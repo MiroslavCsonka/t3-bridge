@@ -153,6 +153,7 @@ export interface Bot {
   readonly manifestVersion?: number;
   readonly conversationMode?: ConversationMode;
   readonly settleAfterDays?: number;
+  readonly announceChannels?: ReadonlyArray<string>;
 }
 
 export interface BotStatus extends Bot {
@@ -198,6 +199,7 @@ export interface BotInput {
   readonly enabled?: boolean;
   readonly conversationMode?: ConversationMode;
   readonly settleAfterDays?: number;
+  readonly announceChannels?: ReadonlyArray<string>;
   readonly sendInstructions?: boolean;
 }
 

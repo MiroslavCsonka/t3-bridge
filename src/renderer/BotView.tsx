@@ -147,6 +147,8 @@ function BotSettings(props: {
   const [reminder, setReminder] = useState(bot.reminder);
   const [perThread, setPerThread] = useState(bot.conversationMode === "per-thread");
   const [allowed, setAllowed] = useState<string[]>([...bot.allowedUserIds]);
+  const savedChannels = (bot.announceChannels ?? []).join(", ");
+  const [channels, setChannels] = useState(savedChannels);
   const [adding, setAdding] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
@@ -158,7 +160,8 @@ function BotSettings(props: {
     instructions !== bot.instructions ||
     reminder !== bot.reminder ||
     perThread !== (bot.conversationMode === "per-thread") ||
-    allowed.join(",") !== bot.allowedUserIds.join(",");
+    allowed.join(",") !== bot.allowedUserIds.join(",") ||
+    channels !== savedChannels;
 
   const save = async (sendInstructions: boolean) => {
     setBusy(true);
@@ -171,6 +174,7 @@ function BotSettings(props: {
         instructions,
         reminder,
         conversationMode: perThread ? "per-thread" : "single",
+        announceChannels: channels.split(/[\s,]+/).filter(Boolean),
         sendInstructions,
       });
       setMessage({ ok: true, text: sendInstructions ? "Saved and sent" : "Saved" });
@@ -293,6 +297,20 @@ function BotSettings(props: {
         </div>
         {allowed.length === 0 && <p className="muted small">Nobody yet. The first person to DM the bot becomes its owner.</p>}
       </Section>
+
+      {bot.platform === "slack" && (
+        <Section
+          title="Announce channels"
+          desc="Channel IDs the bot's T3 threads may post to with t3-bridge announce. Needs one T3 thread per conversation, and the bot invited to each channel."
+        >
+          <input
+            className="input mono"
+            placeholder="C0123ABCD, C0456EFGH"
+            value={channels}
+            onChange={(event) => setChannels(event.target.value)}
+          />
+        </Section>
+      )}
 
       <Section title="Instructions" desc="A new thread starts with these." last>
         <textarea className="input" rows={5} value={instructions} onChange={(event) => setInstructions(event.target.value)} />
