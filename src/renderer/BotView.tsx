@@ -149,6 +149,8 @@ function BotSettings(props: {
   const [allowed, setAllowed] = useState<string[]>([...bot.allowedUserIds]);
   const savedChannels = (bot.announceChannels ?? []).join(", ");
   const [channels, setChannels] = useState(savedChannels);
+  const savedCategories = formatCategories(bot.reactionCategories ?? {});
+  const [categories, setCategories] = useState(savedCategories);
   const [adding, setAdding] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
@@ -161,7 +163,8 @@ function BotSettings(props: {
     reminder !== bot.reminder ||
     perThread !== (bot.conversationMode === "per-thread") ||
     allowed.join(",") !== bot.allowedUserIds.join(",") ||
-    channels !== savedChannels;
+    channels !== savedChannels ||
+    categories !== savedCategories;
 
   const save = async (sendInstructions: boolean) => {
     setBusy(true);
@@ -175,6 +178,7 @@ function BotSettings(props: {
         reminder,
         conversationMode: perThread ? "per-thread" : "single",
         announceChannels: channels.split(/[\s,]+/).filter(Boolean),
+        ...(categories === savedCategories ? {} : { reactionCategories: parseCategories(categories) }),
         sendInstructions,
       });
       setMessage({ ok: true, text: sendInstructions ? "Saved and sent" : "Saved" });
@@ -312,6 +316,20 @@ function BotSettings(props: {
         </Section>
       )}
 
+      {bot.platform === "slack" && (
+        <Section
+          title="Reaction categories"
+          desc="One category per line: name, a colon, then emoji names. Reactions on the bot's messages land in feedback.jsonl with their category; anything unlisted is other. too_noisy, wrong, escalate and ack also tell the bound T3 thread. Clear the box to restore the defaults."
+        >
+          <textarea
+            className="input mono"
+            rows={Math.max(4, categories.split("\n").length)}
+            value={categories}
+            onChange={(event) => setCategories(event.target.value)}
+          />
+        </Section>
+      )}
+
       <Section title="Instructions" desc="A new thread starts with these." last>
         <textarea className="input" rows={5} value={instructions} onChange={(event) => setInstructions(event.target.value)} />
         <Checkbox checked={reminder} onChange={setReminder}>
@@ -331,6 +349,24 @@ function BotSettings(props: {
       </div>
     </section>
   );
+}
+
+function formatCategories(categories: Readonly<Record<string, ReadonlyArray<string>>>) {
+  return Object.entries(categories)
+    .map(([name, emoji]) => `${name}: ${emoji.join(" ")}`)
+    .join("\n");
+}
+
+function parseCategories(text: string): Record<string, string[]> | null {
+  const categories: Record<string, string[]> = {};
+  for (const line of text.split("\n")) {
+    const colon = line.indexOf(":");
+    if (colon <= 0) continue;
+    const name = line.slice(0, colon).trim();
+    const emoji = line.slice(colon + 1).split(/[\s,]+/).filter(Boolean);
+    if (name && emoji.length > 0) categories[name] = [...(categories[name] ?? []), ...emoji];
+  }
+  return Object.keys(categories).length === 0 ? null : categories;
 }
 
 function Section({ title, desc, last = false, children }: { title: string; desc: string; last?: boolean; children: ReactNode }) {

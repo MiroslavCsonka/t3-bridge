@@ -154,6 +154,7 @@ export interface Bot {
   readonly conversationMode?: ConversationMode;
   readonly settleAfterDays?: number;
   readonly announceChannels?: ReadonlyArray<string>;
+  readonly reactionCategories?: Readonly<Record<string, ReadonlyArray<string>>>;
 }
 
 export interface BotStatus extends Bot {
@@ -200,6 +201,7 @@ export interface BotInput {
   readonly conversationMode?: ConversationMode;
   readonly settleAfterDays?: number;
   readonly announceChannels?: ReadonlyArray<string>;
+  readonly reactionCategories?: Readonly<Record<string, ReadonlyArray<string>>> | null;
   readonly sendInstructions?: boolean;
 }
 

@@ -31,6 +31,7 @@ import {
   writeMemoryFile,
   type MemoryFile,
 } from "./core/memory.ts";
+import { categoriesFor, reactionCategoriesOf } from "./core/feedback.ts";
 import { DEFAULT_INSTRUCTIONS } from "./core/render.ts";
 import { RefusedError, type ChatAdapter } from "./core/types.ts";
 import { makeLogger } from "./log.ts";
@@ -73,6 +74,7 @@ export interface BotInput {
   readonly conversationMode?: ConversationMode;
   readonly settleAfterDays?: number;
   readonly announceChannels?: ReadonlyArray<string>;
+  readonly reactionCategories?: Readonly<Record<string, ReadonlyArray<string>>> | null;
   /** Send the instructions to the thread now, for a thread that was not created by the bridge. */
   readonly sendInstructions?: boolean;
 }
@@ -355,6 +357,7 @@ export class Engine {
       ...(input.conversationMode === undefined ? {} : { conversationMode: modeOf(input.conversationMode) }),
       ...(input.settleAfterDays === undefined ? {} : { settleAfterDays: daysOf(input.settleAfterDays) }),
       ...(input.announceChannels === undefined ? {} : { announceChannels: channelsOf(input.announceChannels) }),
+      ...categoriesPatch(input.reactionCategories),
       createdAt: new Date().toISOString(),
     };
     await this.config.update((config) => ({ ...config, bots: [...config.bots, bot] }));
@@ -368,7 +371,7 @@ export class Engine {
     const current = this.config.get().bots.find((bot) => bot.id === id);
     if (current === undefined) throw new NotFoundError("No such bot");
     const saved = await this.saveCredentials(id, current.platform, patch);
-    const next: BotConfig = {
+    let next: BotConfig = {
       ...current,
       ...(saved?.account ? { account: saved.account } : {}),
       ...(patch.name === undefined ? {} : { name: patch.name.trim() || current.name }),
@@ -384,6 +387,10 @@ export class Engine {
       ...(patch.settleAfterDays === undefined ? {} : { settleAfterDays: daysOf(patch.settleAfterDays) }),
       ...(patch.announceChannels === undefined ? {} : { announceChannels: channelsOf(patch.announceChannels) }),
     };
+    if (patch.reactionCategories !== undefined) {
+      const { reactionCategories: _, ...rest } = next;
+      next = { ...rest, ...categoriesPatch(patch.reactionCategories) };
+    }
     await this.replaceBot(next);
     if (patch.sendInstructions && next.threadId !== null)
       await this.sendInstructions(next.threadId, next.instructions);
@@ -675,7 +682,12 @@ function daysOf(days: number): number {
 }
 
 function publicBot(bot: BotConfig) {
-  return bot;
+  return { ...bot, reactionCategories: categoriesFor(bot) };
+}
+
+function categoriesPatch(input: unknown): Pick<BotConfig, "reactionCategories"> {
+  const categories = reactionCategoriesOf(input);
+  return Object.keys(categories).length === 0 ? {} : { reactionCategories: categories };
 }
 
 function modelKey(selection: ModelSelection) {
