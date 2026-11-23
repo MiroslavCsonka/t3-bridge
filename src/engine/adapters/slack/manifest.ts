@@ -5,7 +5,7 @@ import { SHORTCUT_FORWARD } from "./blocks.ts";
  * existing bots to update their Slack app. 2 added canvases, the Stop button and "Send to";
  * 3 made the bot a Slack agent (AI app), which threads each request.
  */
-export const MANIFEST_VERSION = 3;
+export const MANIFEST_VERSION = 4;
 export const AGENT_LAYOUT_MANIFEST_VERSION = 3;
 
 /** The Slack app manifest a user pastes into api.slack.com → Create app → From manifest. */
@@ -88,6 +88,7 @@ export function slackManifest(name: string) {
           "message.im",
           "message.mpim",
           "reaction_added",
+          "reaction_removed",
         ],
       },
       interactivity: { is_enabled: true },

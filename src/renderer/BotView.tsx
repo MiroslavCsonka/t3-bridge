@@ -551,10 +551,17 @@ function SlackCard(props: { api: Api; bot: BotStatus; manifestVersion: number; o
       </div>
       {bot.manifestOutdated ? (
         <div className="update-steps">
-          <p>
-            The new version turns the bot into a Slack AI app: each request gets its own thread with streaming replies, "is
-            working…", a Stop button and canvases for long reports.
-          </p>
+          {(bot.manifestVersion ?? 1) >= 3 ? (
+            <p>
+              The new version lets the bot hear 👍 and 👎 being taken off its messages, so feedback on what it posts is
+              recorded accurately.
+            </p>
+          ) : (
+            <p>
+              The new version turns the bot into a Slack AI app: each request gets its own thread with streaming replies,
+              "is working…", a Stop button, canvases for long reports, and 👍/👎 feedback on its messages.
+            </p>
+          )}
           <ol>
             <li>
               Open{" "}
