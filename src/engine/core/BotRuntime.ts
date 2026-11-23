@@ -155,6 +155,14 @@ export interface BotRuntimeOptions {
   readonly switchThread: (threadId: string) => Promise<void>;
   /** The memory folder of the thread's project; null when T3 no longer has the project. */
   readonly memoryDir: () => Promise<string | null>;
+  readonly session?: ConversationSession;
+}
+
+export interface ConversationSession {
+  readonly key: string;
+  readonly threadId: string | null;
+  readonly conversation: ConversationRef;
+  readonly openThread: (title: string) => Promise<string>;
 }
 
 interface ThreadModel {
@@ -204,6 +212,7 @@ export class BotRuntime {
   private deliveryTimer: NodeJS.Timeout | null = null;
   private saveTimer: NodeJS.Timeout | null = null;
   private stopped = false;
+  private opening: Promise<string> | null = null;
   adapterStatus: AdapterStatus = { state: "connecting" };
   lastError: string | null = null;
 
@@ -222,25 +231,56 @@ export class BotRuntime {
   }
 
   private get stateFile() {
-    return Path.join(this.options.dataDir, "state", `${this.bot.id}.json`);
+    const session = this.options.session;
+    if (session === undefined) return Path.join(this.options.dataDir, "state", `${this.bot.id}.json`);
+    const name = Crypto.createHash("sha256").update(session.key).digest("hex").slice(0, 24);
+    return Path.join(this.options.dataDir, "state", this.bot.id, `${name}.json`);
+  }
+
+  get threadId(): string | null {
+    return this.state?.threadId ?? null;
+  }
+
+  watches(threadId: string) {
+    return this.threadId === threadId || this.children.has(threadId);
   }
 
   async start(): Promise<void> {
+    const threadId =
+      this.options.session === undefined ? this.bot.threadId : this.options.session.threadId;
     const stored = await readJson<BotState>(this.stateFile);
     this.state =
-      stored !== null && stored.threadId === this.bot.threadId
+      stored !== null && stored.threadId === threadId
         ? stored
         : {
-            threadId: this.bot.threadId,
-            boundAt: this.bot.threadId === null ? null : new Date().toISOString(),
+            threadId,
+            boundAt: threadId === null ? null : new Date().toISOString(),
             lastSequence: null,
             posts: {},
             sentMessages: {},
             lastConversation: stored?.lastConversation ?? null,
           };
     this.scheduleSave();
-    if (this.bot.threadId !== null) this.subscribeMain(ThreadId.make(this.bot.threadId));
+    if (threadId !== null) this.subscribeMain(ThreadId.make(threadId));
     void this.startAdapter();
+  }
+
+  private openThread(title: string): Promise<string> {
+    this.opening ??= this.options.session!.openThread(title).then(
+      (threadId) => {
+        this.state.threadId = threadId;
+        this.state.boundAt = new Date().toISOString();
+        this.state.lastSequence = null;
+        this.scheduleSave();
+        this.subscribeMain(ThreadId.make(threadId));
+        return threadId;
+      },
+      (error: unknown) => {
+        this.opening = null;
+        throw error;
+      },
+    );
+    return this.opening;
   }
 
   /** The chat platform can be unreachable at login (no network yet); keep trying. */
@@ -413,7 +453,7 @@ export class BotRuntime {
     if (run !== undefined && this.options.isBridgeMessage(run.userMessageId)) return;
     if (item.type === "assistant_message" && !item.streaming)
       void this.saveFacts(`a:${item.id}`, item.text, "orchestrator");
-    const keyed = postForTurnItem(item, this.renderContext(this.bot.threadId!, this.main));
+    const keyed = postForTurnItem(item, this.renderContext(this.state.threadId!, this.main));
     if (keyed === null) {
       this.heldReplies.delete(item.id);
       return;
@@ -749,6 +789,7 @@ export class BotRuntime {
     post: OutboundPost,
     runId: string | null,
   ): Promise<ConversationRef | null> {
+    if (this.options.session !== undefined) return this.options.session.conversation;
     const home = await this.homeConversation();
     if (!this.options.threaded) return home;
     // Text typed in T3 opens a new thread of its own; its run's replies follow it there.
@@ -875,9 +916,15 @@ export class BotRuntime {
     }
     // In a shared channel only messages addressed to the bot are work: a mention, or a reply
     // under one of the bot's own posts. Direct messages always are.
-    if (!message.isDirect && !message.mentionsBot && !this.isReplyToBot(message.replyTo)) return;
-    const threadId = this.bot.threadId;
-    if (threadId === null) {
+    if (
+      !message.isDirect &&
+      !message.mentionsBot &&
+      !this.isReplyToBot(message.replyTo) &&
+      !this.continuesSession(message)
+    )
+      return;
+    let threadId = this.state.threadId;
+    if (threadId === null && this.options.session === undefined) {
       await adapter.reply(
         message,
         "This bot is not connected to a T3 thread yet. Pick one in T3 Bridge.",
@@ -889,9 +936,11 @@ export class BotRuntime {
       label: message.conversation.label,
     };
     // In agent layout every request is a thread: a new message starts one, a reply continues it.
-    const conversation: ConversationRef = this.options.threaded
-      ? { ...message.conversation, threadTs: message.replyTo?.ts ?? message.ref.ts! }
-      : message.conversation;
+    const conversation: ConversationRef =
+      this.options.session?.conversation ??
+      (this.options.threaded
+        ? { ...message.conversation, threadTs: message.replyTo?.ts ?? message.ref.ts! }
+        : message.conversation);
     if (this.options.threaded) this.state.lastThread = conversation;
 
     const text = message.text.trim();
@@ -920,6 +969,7 @@ export class BotRuntime {
         ...message,
         files: [...earlier.files, ...message.files],
       });
+      threadId ??= await this.openThread(requestTitle(earlier.opening ?? text));
       const messageId = MessageId.make(Crypto.randomUUID());
       this.state.sentMessages[messageId] = {
         ref: message.ref,
@@ -1140,6 +1190,10 @@ export class BotRuntime {
     return attachments;
   }
 
+  private continuesSession(message: InboundMessage) {
+    return this.options.session !== undefined && this.state.threadId !== null && message.replyTo !== null;
+  }
+
   private isReplyToBot(replyTo: MessageRef | null) {
     if (replyTo === null) return false;
     return (
@@ -1214,11 +1268,12 @@ export class BotRuntime {
 
   /** Stops the agent's current turn, as a stop reaction in chat would. */
   async stopThread() {
-    if (this.bot.threadId === null) return;
+    const threadId = this.state.threadId;
+    if (threadId === null) return;
     await this.options.t3.dispatch({
       type: "thread.stop",
       commandId: CommandId.make(Crypto.randomUUID()),
-      threadId: ThreadId.make(this.bot.threadId),
+      threadId: ThreadId.make(threadId),
     });
   }
 
@@ -1237,6 +1292,7 @@ export class BotRuntime {
       clearTimeout(this.saveTimer);
       this.saveTimer = null;
     }
+    if (this.options.session !== undefined && this.state.threadId === null) return;
     const trimmed = newest(this.state.posts);
     if (trimmed.floorAt !== null) this.state.floorAt = trimmed.floorAt;
     this.state.posts = trimmed.records;
