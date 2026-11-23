@@ -132,6 +132,8 @@ export interface ThreadSummary {
 
 export type Platform = "slack" | "discord" | "telegram";
 
+export type ConversationMode = "single" | "per-thread";
+
 export const PLATFORM_NAMES: Record<Platform, string> = {
   slack: "Slack",
   discord: "Discord",
@@ -149,6 +151,8 @@ export interface Bot {
   readonly instructions: string;
   readonly reminder: boolean;
   readonly manifestVersion?: number;
+  readonly conversationMode?: ConversationMode;
+  readonly settleAfterDays?: number;
 }
 
 export interface BotStatus extends Bot {
@@ -157,6 +161,7 @@ export interface BotStatus extends Bot {
   readonly manifestOutdated: boolean;
   /** Discord's invite to a server, or the bot's t.me link. */
   readonly chatLink: string | null;
+  readonly conversations: number | null;
   readonly activity: {
     readonly working: ActivityEntry | null;
     readonly today: number;
@@ -191,6 +196,8 @@ export interface BotInput {
   readonly reminder?: boolean;
   readonly manifestVersion?: number;
   readonly enabled?: boolean;
+  readonly conversationMode?: ConversationMode;
+  readonly settleAfterDays?: number;
   readonly sendInstructions?: boolean;
 }
 

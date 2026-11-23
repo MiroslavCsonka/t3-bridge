@@ -277,8 +277,19 @@ function BotCard(props: {
       <div className="thread-line">
         <CornerDownRight size={16} className="faint" />
         <div className="grow">
-          <div className="thread-title">{bot.threadId === null ? "No thread picked" : (thread?.title ?? "Thread")}</div>
-          <div className="thread-meta">{threadMeta(thread)}</div>
+          {bot.conversations === null ? (
+            <>
+              <div className="thread-title">{bot.threadId === null ? "No thread picked" : (thread?.title ?? "Thread")}</div>
+              <div className="thread-meta">{threadMeta(thread)}</div>
+            </>
+          ) : (
+            <>
+              <div className="thread-title">
+                {bot.conversations} active conversation{bot.conversations === 1 ? "" : "s"}
+              </div>
+              <div className="thread-meta">One T3 thread each · {thread?.projectTitle ?? "Project"}</div>
+            </>
+          )}
         </div>
         <span className="thread-meta">{bot.activity.today} today</span>
       </div>
@@ -291,7 +302,7 @@ function BotCard(props: {
         <button className="btn outline" onClick={open}>
           Settings
         </button>
-        {!dark && (
+        {!dark && bot.conversations === null && (
           <button
             className="btn outline"
             disabled={busy || bot.threadId === null}

@@ -145,6 +145,7 @@ function BotSettings(props: {
   const [threadId, setThreadId] = useState<string | null>(bot.threadId);
   const [instructions, setInstructions] = useState(bot.instructions);
   const [reminder, setReminder] = useState(bot.reminder);
+  const [perThread, setPerThread] = useState(bot.conversationMode === "per-thread");
   const [allowed, setAllowed] = useState<string[]>([...bot.allowedUserIds]);
   const [adding, setAdding] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -156,6 +157,7 @@ function BotSettings(props: {
     threadId !== bot.threadId ||
     instructions !== bot.instructions ||
     reminder !== bot.reminder ||
+    perThread !== (bot.conversationMode === "per-thread") ||
     allowed.join(",") !== bot.allowedUserIds.join(",");
 
   const save = async (sendInstructions: boolean) => {
@@ -168,6 +170,7 @@ function BotSettings(props: {
         allowedUserIds: allowed,
         instructions,
         reminder,
+        conversationMode: perThread ? "per-thread" : "single",
         sendInstructions,
       });
       setMessage({ ok: true, text: sendInstructions ? "Saved and sent" : "Saved" });
@@ -208,7 +211,14 @@ function BotSettings(props: {
         <input className="input" value={name} onChange={(event) => setName(event.target.value)} />
       </Section>
 
-      <Section title="Orchestrator thread" desc={`Every message from ${PLATFORM_NAMES[bot.platform]} goes to this T3 thread.`}>
+      <Section
+        title="Orchestrator thread"
+        desc={
+          perThread
+            ? `Each ${PLATFORM_NAMES[bot.platform]} conversation gets its own T3 thread in this thread's project, with its model.`
+            : `Every message from ${PLATFORM_NAMES[bot.platform]} goes to this T3 thread.`
+        }
+      >
         {props.threads === null ? (
           <p className="muted">Loading threads from T3…</p>
         ) : (
@@ -233,6 +243,14 @@ function BotSettings(props: {
             {dirty ? "Save, then send the instructions to the thread" : "Send the instructions to the thread now"}
           </button>
         </div>
+        <Checkbox checked={perThread} onChange={setPerThread}>
+          One T3 thread per conversation: each {bot.platform === "slack" ? "Slack thread" : "reply chain, thread or topic"} gets a thread of its own
+        </Checkbox>
+        {bot.conversations !== null && (
+          <p className="muted small">
+            {bot.conversations} active conversation{bot.conversations === 1 ? "" : "s"}. Idle ones are settled after {bot.settleAfterDays ?? 7} days.
+          </p>
+        )}
       </Section>
 
       <Section title="Who may use it" desc={USER_ID_HINT[bot.platform]}>
