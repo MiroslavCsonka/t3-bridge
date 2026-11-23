@@ -160,6 +160,8 @@ describe("DiscordAdapter inbound", () => {
     await mentionIn("t1", "m4");
     await mentionIn("c1", "m3");
     expect(inbound[0]!.replyTo).toBeNull();
+    expect(inbound[0]!.conversation.meta).toEqual({ thread: "t1" });
+    expect(inbound[2]!.conversation.meta).toBeUndefined();
     expect(await inbound[0]!.earlier!()).toEqual([{ author: "Riza", text: "still failing", files: [] }]);
     expect(await inbound[1]!.earlier!()).toEqual([{ author: "wpkeeper", text: "Backup failed", files: [] }]);
     expect(await inbound[2]!.earlier!()).toEqual([]);
@@ -169,7 +171,11 @@ describe("DiscordAdapter inbound", () => {
     const { actions, dispatch } = setup();
     await dispatch("MESSAGE_REACTION_ADD", { user_id: "7", emoji: { name: "🛑" } });
     await dispatch("MESSAGE_REACTION_ADD", { user_id: "7", emoji: { name: "👍" } });
-    expect(actions).toEqual([{ type: "stop", userId: "7" }]);
+    await dispatch("MESSAGE_REACTION_ADD", { user_id: "7", channel_id: "c1", message_id: "m1", emoji: { name: "🛑" } });
+    expect(actions).toEqual([
+      { type: "stop", userId: "7" },
+      { type: "stop", userId: "7", message: { channel: "c1", ts: "m1" } },
+    ]);
   });
 
   it("acknowledges a button press and turns it into an action", async () => {
