@@ -9,6 +9,7 @@ import { slackManifest } from "../adapters/slack/manifest.ts";
 import { testSlackTokens } from "../adapters/slack/SlackAdapter.ts";
 import { testTelegramToken } from "../adapters/telegram/TelegramAdapter.ts";
 import { DEFAULT_INSTRUCTIONS } from "../core/render.ts";
+import { RefusedError } from "../core/types.ts";
 import { NotFoundError, type BotInput, type Engine } from "../Engine.ts";
 import type { Updater } from "../updater.ts";
 import { BRIDGE_VERSION } from "../version.ts";
@@ -147,7 +148,13 @@ export class ControlServer {
       );
     } catch (error) {
       const status =
-        error instanceof HttpError ? error.status : error instanceof NotFoundError ? 404 : 500;
+        error instanceof HttpError
+          ? error.status
+          : error instanceof NotFoundError
+            ? 404
+            : error instanceof RefusedError
+              ? 400
+              : 500;
       const message = error instanceof Error ? error.message : String(error);
       if (status === 500)
         this.options.engine.log.warn(`Control API ${request.method} ${url.pathname}`, error);
@@ -199,6 +206,9 @@ export class ControlServer {
       return engine.saveMemory(memoryMatch[1]!, body as { name: string; text: string });
     const freshMatch =/^\/api\/bots\/([\w-]+)\/new-thread$/.exec(path);
     if (method === "POST" && freshMatch !== null) return engine.startFreshThread(freshMatch[1]!);
+    const announceMatch = /^\/api\/bots\/([\w-]+)\/announce$/.exec(path);
+    if (method === "POST" && announceMatch !== null)
+      return engine.announce(announceMatch[1]!, body as never);
     const stopMatch = /^\/api\/bots\/([\w-]+)\/stop$/.exec(path);
     if (method === "POST" && stopMatch !== null) {
       await engine.stopAgent(stopMatch[1]!);

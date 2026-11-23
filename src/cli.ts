@@ -3,6 +3,7 @@ import * as OS from "node:os";
 import * as Path from "node:path";
 import { parseArgs } from "node:util";
 
+import { runAnnounce } from "./engine/announceClient.ts";
 import { ControlServer, tailnetAddresses } from "./engine/api/ControlServer.ts";
 import { Engine } from "./engine/Engine.ts";
 import * as Service from "./engine/service.ts";
@@ -19,6 +20,9 @@ Usage: npx t3-bridge [command]
   uninstall    Stop the background service; bots and settings are kept
   link         Print the control panel link
   status       Show whether T3 Code and the bots are connected
+  announce     Post as a bot into an allowed channel and bind that Slack thread to a T3 thread:
+               announce --bot <name|id> --channel <id> --thread <t3ThreadId>
+                 [--slack-thread <ts>] [--title <title>] [--dry-run] < text
 `;
 
 // Overrides for development against an isolated T3 server; see README.
@@ -32,6 +36,12 @@ const { values: flags, positionals } = parseArgs({
     "status-file": { type: "string" },
     help: { type: "boolean", short: "h" },
     version: { type: "boolean", short: "v" },
+    bot: { type: "string" },
+    channel: { type: "string" },
+    thread: { type: "string" },
+    "slack-thread": { type: "string" },
+    title: { type: "string" },
+    "dry-run": { type: "boolean" },
   },
 });
 
@@ -164,6 +174,30 @@ async function status() {
   if (body.bots.length === 0) console.log("No bots yet. Add one in the control panel.");
 }
 
+async function readStdin(): Promise<string> {
+  if (process.stdin.isTTY) return "";
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+async function announce() {
+  const outcome = await runAnnounce(
+    dataDir,
+    {
+      bot: flags.bot,
+      channel: flags.channel,
+      thread: flags.thread,
+      slackThread: flags["slack-thread"],
+      title: flags.title,
+      dryRun: flags["dry-run"],
+    },
+    await readStdin(),
+  );
+  console.log(JSON.stringify(outcome.output));
+  process.exitCode = outcome.exitCode;
+}
+
 async function main() {
   const command = positionals[0] ?? "run";
   if (process.env.T3_BRIDGE_DATA === undefined) Service.moveLegacyData(process.platform, OS.homedir(), dataDir);
@@ -184,6 +218,8 @@ async function main() {
     }
     case "status":
       return status();
+    case "announce":
+      return announce();
     default:
       console.error(`Unknown command: ${command}\n\n${HELP}`);
       process.exitCode = 1;
