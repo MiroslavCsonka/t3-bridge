@@ -17,6 +17,7 @@ import { TelegramAdapter, testTelegramToken } from "./adapters/telegram/Telegram
 import { isWorking, type ActivityEntry } from "./core/activity.ts";
 import { BotRuntime } from "./core/BotRuntime.ts";
 import { ButtonStore } from "./core/ButtonStore.ts";
+import { ConversationRouter } from "./core/ConversationRouter.ts";
 import {
   MEMORY_LINE_LIMIT,
   displayPath,
@@ -35,6 +36,7 @@ import {
   writeJsonAtomic,
   type BotConfig,
   type BridgeConfig,
+  type ConversationMode,
   type Platform,
   type SecretStore,
 } from "./store.ts";
@@ -64,6 +66,8 @@ export interface BotInput {
   readonly reminder?: boolean;
   readonly manifestVersion?: number;
   readonly enabled?: boolean;
+  readonly conversationMode?: ConversationMode;
+  readonly settleAfterDays?: number;
   /** Send the instructions to the thread now, for a thread that was not created by the bridge. */
   readonly sendInstructions?: boolean;
 }
@@ -81,6 +85,8 @@ export interface ThreadSummary {
 
 const botSecret = (botId: string, name: string) => `bot.${botId}.${name}`;
 
+const DEFAULT_SETTLE_AFTER_DAYS = 7;
+
 const PLATFORM_LABELS: Record<Platform, string> = {
   slack: "Slack",
   discord: "Discord",
@@ -91,7 +97,7 @@ export class Engine {
   readonly log;
   readonly config: ConfigStore;
   t3!: T3Client;
-  private readonly bots = new Map<string, BotRuntime>();
+  private readonly bots = new Map<string, BotRuntime | ConversationRouter>();
   private bridgeMessages = new Set<string>();
 
   private readonly options: EngineOptions;
@@ -146,6 +152,7 @@ export class Engine {
           manifestOutdated: bot.platform === "slack" && (bot.manifestVersion ?? 1) < MANIFEST_VERSION,
           chatLink: chatLink(bot),
           activity: summarize(runtime?.activity ?? []),
+          conversations: runtime instanceof ConversationRouter ? runtime.conversationCount : null,
         };
       }),
     };
@@ -216,6 +223,7 @@ export class Engine {
     readonly title: string;
     readonly instructions?: string;
     readonly modelSelection?: ModelSelection;
+    readonly pin?: boolean;
   }): Promise<{ threadId: string }> {
     const shell = await this.t3.getShell();
     const project = shell.projects.find((candidate) => candidate.id === input.projectId);
@@ -247,13 +255,14 @@ export class Engine {
         attachments: [],
       },
     });
-    await this.t3
-      .dispatch({
-        type: "thread.pin",
-        commandId: CommandId.make(Crypto.randomUUID()),
-        threadId: launched.threadId,
-      })
-      .catch((error: unknown) => this.log.warn("Pinning the new thread failed", error));
+    if (input.pin !== false)
+      await this.t3
+        .dispatch({
+          type: "thread.pin",
+          commandId: CommandId.make(Crypto.randomUUID()),
+          threadId: launched.threadId,
+        })
+        .catch((error: unknown) => this.log.warn("Pinning the new thread failed", error));
     return { threadId: launched.threadId };
   }
 
@@ -335,6 +344,8 @@ export class Engine {
       instructions: input.instructions?.trim() || DEFAULT_INSTRUCTIONS,
       reminder: input.reminder ?? true,
       ...(input.platform === "slack" ? { manifestVersion: MANIFEST_VERSION } : {}),
+      ...(input.conversationMode === undefined ? {} : { conversationMode: modeOf(input.conversationMode) }),
+      ...(input.settleAfterDays === undefined ? {} : { settleAfterDays: daysOf(input.settleAfterDays) }),
       createdAt: new Date().toISOString(),
     };
     await this.config.update((config) => ({ ...config, bots: [...config.bots, bot] }));
@@ -360,6 +371,8 @@ export class Engine {
       ...(patch.reminder === undefined ? {} : { reminder: patch.reminder }),
       ...(patch.manifestVersion === undefined ? {} : { manifestVersion: patch.manifestVersion }),
       ...(patch.enabled === undefined ? {} : { enabled: patch.enabled }),
+      ...(patch.conversationMode === undefined ? {} : { conversationMode: modeOf(patch.conversationMode) }),
+      ...(patch.settleAfterDays === undefined ? {} : { settleAfterDays: daysOf(patch.settleAfterDays) }),
     };
     await this.replaceBot(next);
     if (patch.sendInstructions && next.threadId !== null)
@@ -370,20 +383,41 @@ export class Engine {
   /** A new orchestrator thread in the same project, with the same model and instructions. */
   async createFreshThread(botId: string): Promise<{ threadId: string; title: string }> {
     const bot = this.config.get().bots.find((candidate) => candidate.id === botId);
+    const day = new Date().toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+    return this.createLikeBotThread(botId, `${bot?.name ?? "Bot"} orchestrator · ${day}`, true);
+  }
+
+  async createConversationThread(botId: string, title: string) {
+    return this.createLikeBotThread(botId, title, false);
+  }
+
+  private async createLikeBotThread(
+    botId: string,
+    title: string,
+    pin: boolean,
+  ): Promise<{ threadId: string; title: string }> {
+    const bot = this.config.get().bots.find((candidate) => candidate.id === botId);
     if (bot === undefined) throw new NotFoundError("No such bot");
     const shell = await this.t3.getShell();
     const current = shell.threads.find((thread) => thread.id === bot.threadId);
     if (current === undefined)
       throw new Error("The bot's current thread is gone; pick one in T3 Bridge.");
-    const day = new Date().toLocaleDateString("en-GB", { day: "numeric", month: "short" });
-    const title = `${bot.name} orchestrator · ${day}`;
     const { threadId } = await this.createOrchestratorThread({
       projectId: current.projectId,
       title,
       instructions: bot.instructions,
       modelSelection: current.modelSelection,
+      pin,
     });
     return { threadId, title };
+  }
+
+  private async settleThread(threadId: string) {
+    await this.t3.dispatch({
+      type: "thread.settle",
+      commandId: CommandId.make(Crypto.randomUUID()),
+      threadId: ThreadId.make(threadId),
+    });
   }
 
   /** Moves a bot to another thread; the one it leaves is unpinned so the pinned list stays current. */
@@ -481,14 +515,14 @@ export class Engine {
     if (!bot.enabled) return;
     const adapter = await this.makeAdapter(bot);
     if (adapter === null) return;
-    const runtime = new BotRuntime({
+    const shared = {
       bot,
       adapter,
       t3: this.t3,
       dataDir: this.options.dataDir,
       log: this.log,
       platformLabel: PLATFORM_LABELS[bot.platform],
-      claimOwner: async (userId) => {
+      claimOwner: async (userId: string) => {
         const latest = this.config.get().bots.find((candidate) => candidate.id === bot.id);
         if (latest === undefined || latest.allowedUserIds.length > 0) return;
         this.log.info(`[${bot.name}] claimed by ${userId}`);
@@ -501,12 +535,24 @@ export class Engine {
         // The runtime reads allowed users from its own copy; keep it in step without a restart.
         (runtime.bot as { allowedUserIds: ReadonlyArray<string> }).allowedUserIds = [userId];
       },
-      isBridgeMessage: (messageId) => this.bridgeMessages.has(messageId),
+      isBridgeMessage: (messageId: string) => this.bridgeMessages.has(messageId),
       threaded: isAgentLayout(bot),
-      createFreshThread: () => this.createFreshThread(bot.id),
-      switchThread: (threadId) => this.switchThread(bot.id, threadId),
       memoryDir: () => this.memoryDirForThread(bot.threadId),
-    });
+    };
+    const settleAfterDays = bot.settleAfterDays ?? DEFAULT_SETTLE_AFTER_DAYS;
+    const runtime: BotRuntime | ConversationRouter =
+      bot.conversationMode === "per-thread"
+        ? new ConversationRouter({
+            ...shared,
+            openThread: (title) => this.createConversationThread(bot.id, title),
+            settleThread: (threadId) => this.settleThread(threadId),
+            settleAfterMs: settleAfterDays > 0 ? settleAfterDays * 24 * 60 * 60_000 : null,
+          })
+        : new BotRuntime({
+            ...shared,
+            createFreshThread: () => this.createFreshThread(bot.id),
+            switchThread: (threadId) => this.switchThread(bot.id, threadId),
+          });
     this.bots.set(bot.id, runtime);
     try {
       await runtime.start();
@@ -567,6 +613,14 @@ function chatLink(bot: BotConfig): string | null {
   if (bot.platform === "telegram" && bot.account?.username)
     return `https://t.me/${bot.account.username}`;
   return null;
+}
+
+function modeOf(mode: string): ConversationMode {
+  return mode === "per-thread" ? "per-thread" : "single";
+}
+
+function daysOf(days: number): number {
+  return Number.isFinite(days) && days > 0 ? days : 0;
 }
 
 function publicBot(bot: BotConfig) {
