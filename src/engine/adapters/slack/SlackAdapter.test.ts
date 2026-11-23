@@ -613,3 +613,40 @@ describe("SlackAdapter thread context", () => {
     ).toBe(true);
   });
 });
+
+describe("SlackAdapter.announceTarget", () => {
+  const withChannels = (adapter: SlackAdapter, channels: Record<string, { is_member: boolean } | null>) => {
+    const web = (adapter as unknown as { web: Record<string, unknown> }).web;
+    web.conversations = {
+      info: async ({ channel }: { channel: string }) => {
+        const found = channels[channel];
+        if (found === null || found === undefined)
+          throw Object.assign(new Error("channel_not_found"), { data: { error: "channel_not_found" } });
+        return { channel: found };
+      },
+    };
+    web.auth = { test: async () => ({ team_id: "T1" }) };
+  };
+
+  it("returns the channel as a conversation for the bot's owner when the bot is a member", async () => {
+    const { adapter } = setup({ threaded: true });
+    withChannels(adapter, { C9: { is_member: true } });
+    expect(await adapter.announceTarget("C9", "U1")).toEqual({
+      id: "C9",
+      label: "<#C9>",
+      meta: { user: "U1", team: "T1" },
+    });
+  });
+
+  it("asks for an invite when the bot is not in the channel or cannot see it", async () => {
+    const { adapter } = setup();
+    withChannels(adapter, { C9: { is_member: false }, C10: null });
+    await expect(adapter.announceTarget("C9", "U1")).rejects.toThrow(/not a member of channel C9.*\/invite @Test/);
+    await expect(adapter.announceTarget("C10", "U1")).rejects.toThrow(/not a member of channel C10/);
+  });
+
+  it("links to a posted message", async () => {
+    const { adapter } = setup();
+    expect(await adapter.permalink({ channel: "C1", ts: "1.000" })).toBe("https://x.slack.com/archives/C1/p1");
+  });
+});

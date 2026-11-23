@@ -164,6 +164,7 @@ export interface ConversationSession {
   readonly threadId: string | null;
   readonly conversation: ConversationRef;
   readonly openThread: (title: string, first: FirstMessage) => Promise<string>;
+  readonly quietBefore?: string;
 }
 
 export interface FirstMessage {
@@ -459,6 +460,7 @@ export class BotRuntime {
     // The agent's acknowledgement of the bridge's own setup instructions stays in T3.
     const run = item.runId === null ? undefined : this.runs.get(item.runId);
     if (run !== undefined && this.options.isBridgeMessage(run.userMessageId)) return;
+    if (run !== undefined && this.beforeAnnounce(run)) return;
     if (item.type === "assistant_message" && !item.streaming)
       void this.saveFacts(`a:${item.id}`, item.text, "orchestrator");
     const keyed = postForTurnItem(item, this.renderContext(this.state.threadId!, this.main));
@@ -471,6 +473,11 @@ export class BotRuntime {
       return;
     }
     this.enqueue(keyed, item.runId);
+  }
+
+  private beforeAnnounce(run: OrchestrationV2Run) {
+    const quietBefore = this.options.session?.quietBefore;
+    return quietBefore !== undefined && toMillis(run.requestedAt) < Date.parse(quietBefore);
   }
 
   private isWakeRun(run: OrchestrationV2Run) {

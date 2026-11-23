@@ -17,7 +17,11 @@ import { TelegramAdapter, testTelegramToken } from "./adapters/telegram/Telegram
 import { isWorking, type ActivityEntry } from "./core/activity.ts";
 import { BotRuntime, type FirstMessage } from "./core/BotRuntime.ts";
 import { ButtonStore } from "./core/ButtonStore.ts";
-import { ConversationRouter } from "./core/ConversationRouter.ts";
+import {
+  ConversationRouter,
+  type AnnounceRequest,
+  type AnnounceResult,
+} from "./core/ConversationRouter.ts";
 import {
   MEMORY_LINE_LIMIT,
   displayPath,
@@ -28,7 +32,7 @@ import {
   type MemoryFile,
 } from "./core/memory.ts";
 import { DEFAULT_INSTRUCTIONS } from "./core/render.ts";
-import type { ChatAdapter } from "./core/types.ts";
+import { RefusedError, type ChatAdapter } from "./core/types.ts";
 import { makeLogger } from "./log.ts";
 import {
   ConfigStore,
@@ -68,6 +72,7 @@ export interface BotInput {
   readonly enabled?: boolean;
   readonly conversationMode?: ConversationMode;
   readonly settleAfterDays?: number;
+  readonly announceChannels?: ReadonlyArray<string>;
   /** Send the instructions to the thread now, for a thread that was not created by the bridge. */
   readonly sendInstructions?: boolean;
 }
@@ -349,6 +354,7 @@ export class Engine {
       ...(input.platform === "slack" ? { manifestVersion: MANIFEST_VERSION } : {}),
       ...(input.conversationMode === undefined ? {} : { conversationMode: modeOf(input.conversationMode) }),
       ...(input.settleAfterDays === undefined ? {} : { settleAfterDays: daysOf(input.settleAfterDays) }),
+      ...(input.announceChannels === undefined ? {} : { announceChannels: channelsOf(input.announceChannels) }),
       createdAt: new Date().toISOString(),
     };
     await this.config.update((config) => ({ ...config, bots: [...config.bots, bot] }));
@@ -376,6 +382,7 @@ export class Engine {
       ...(patch.enabled === undefined ? {} : { enabled: patch.enabled }),
       ...(patch.conversationMode === undefined ? {} : { conversationMode: modeOf(patch.conversationMode) }),
       ...(patch.settleAfterDays === undefined ? {} : { settleAfterDays: daysOf(patch.settleAfterDays) }),
+      ...(patch.announceChannels === undefined ? {} : { announceChannels: channelsOf(patch.announceChannels) }),
     };
     await this.replaceBot(next);
     if (patch.sendInstructions && next.threadId !== null)
@@ -446,6 +453,37 @@ export class Engine {
     const fresh = await this.createFreshThread(botId);
     await this.switchThread(botId, fresh.threadId);
     return fresh;
+  }
+
+  async announce(botId: string, input: Partial<AnnounceRequest>): Promise<AnnounceResult> {
+    const bot = this.config.get().bots.find((candidate) => candidate.id === botId);
+    if (bot === undefined) throw new NotFoundError("No such bot");
+    const channel = text(input.channel);
+    const threadId = text(input.threadId);
+    const message = typeof input.text === "string" ? input.text.trim() : "";
+    if (channel === "" || threadId === "") throw new RefusedError("Announce needs a channel and a T3 thread id.");
+    if (message === "") throw new RefusedError("Announce needs some text to post.");
+    if (bot.platform !== "slack") throw new RefusedError(`${bot.name} is a ${PLATFORM_LABELS[bot.platform]} bot; announcing works for Slack bots only.`);
+    if (bot.conversationMode !== "per-thread")
+      throw new RefusedError(
+        `${bot.name} is in single mode, where every Slack thread shares the bot's one T3 thread, so a Slack thread cannot be bound to another T3 thread. Turn on "One T3 thread per conversation" for it in T3 Bridge.`,
+      );
+    const shell = await this.t3.getShell();
+    const thread = shell.threads.find((candidate) => candidate.id === threadId);
+    if (thread === undefined || thread.deletedAt !== null || thread.archivedAt !== null)
+      throw new RefusedError(`T3 has no open thread ${threadId}.`);
+    const runtime = this.bots.get(botId);
+    if (!(runtime instanceof ConversationRouter)) throw new RefusedError(`${bot.name} is not running.`);
+    const slackThreadTs = text(input.slackThreadTs);
+    const title = text(input.title);
+    return runtime.announce({
+      channel,
+      threadId,
+      text: message,
+      ...(title === "" ? {} : { title }),
+      ...(slackThreadTs === "" ? {} : { slackThreadTs }),
+      dryRun: input.dryRun === true,
+    });
   }
 
   async stopAgent(botId: string) {
@@ -622,6 +660,14 @@ function chatLink(bot: BotConfig): string | null {
 
 function modeOf(mode: string): ConversationMode {
   return mode === "per-thread" ? "per-thread" : "single";
+}
+
+function channelsOf(channels: ReadonlyArray<string>): string[] {
+  return [...new Set(channels.map((channel) => channel.trim()).filter(Boolean))];
+}
+
+function text(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
 }
 
 function daysOf(days: number): number {

@@ -184,6 +184,8 @@ export class PlatformError extends Error {
   }
 }
 
+export class RefusedError extends Error {}
+
 export interface ChatAdapter {
   /** How the agent mentions someone on this platform, told to it with each message. */
   readonly mentionHint?: string;
@@ -209,4 +211,6 @@ export interface ChatAdapter {
   setThreadTitle?(conversation: ConversationRef, title: string): Promise<void>;
   /** Opens a direct conversation with a user, for posts before anyone has messaged the bot. */
   openDirect?(userId: string): Promise<ConversationRef>;
+  announceTarget?(channel: string, recipient: string | undefined): Promise<ConversationRef>;
+  permalink?(message: MessageRef): Promise<string | null>;
 }

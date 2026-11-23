@@ -8,7 +8,7 @@ import { makeLogger } from "../log.ts";
 import type { BotConfig } from "../store.ts";
 import type { T3Client } from "../t3/T3Client.ts";
 import { ConversationRouter } from "./ConversationRouter.ts";
-import type { ChatAdapter, ConversationRef, InboundMessage, OutboundPost } from "./types.ts";
+import { RefusedError, type ChatAdapter, type ConversationRef, type InboundMessage, type OutboundPost } from "./types.ts";
 
 const dirs: string[] = [];
 afterEach(async () => {
@@ -56,7 +56,13 @@ function world() {
     reply: async (_message, text) => {
       replies.push(text);
     },
+    announceTarget: async (channel, recipient) => {
+      if (!memberOf.includes(channel)) throw new RefusedError(`Developer is not a member of channel ${channel}. Invite it there with /invite @Developer`);
+      return { id: channel, label: `<#${channel}>`, meta: { user: recipient ?? "", team: "T1" } };
+    },
+    permalink: async (message) => `https://team.slack.com/archives/${message.channel}/p${message.ts!.replace(".", "")}`,
   };
+  const memberOf = ["C9", "C10"];
   return {
     t3,
     adapter,
@@ -72,7 +78,12 @@ function world() {
 }
 
 async function setup(
-  options: { dataDir?: string; gate?: Promise<void>; platform?: BotConfig["platform"] } = {},
+  options: {
+    dataDir?: string;
+    gate?: Promise<void>;
+    platform?: BotConfig["platform"];
+    announceChannels?: ReadonlyArray<string>;
+  } = {},
   shared: ReturnType<typeof world> = world(),
 ) {
   const dataDir = options.dataDir ?? (await FS.mkdtemp(Path.join(OS.tmpdir(), "t3-bridge-router-")));
@@ -90,6 +101,7 @@ async function setup(
     instructions: "",
     reminder: false,
     conversationMode: "per-thread",
+    announceChannels: options.announceChannels ?? ["C9"],
     createdAt: new Date().toISOString(),
   };
   const router = new ConversationRouter({
@@ -353,5 +365,154 @@ describe("ConversationRouter", () => {
     expect(sent("t-1")).toHaveLength(2);
     expect(router.conversationCount).toBe(1);
     await router.stop();
+  });
+
+  describe("announce", () => {
+    const snapshot = { kind: "snapshot", snapshotSequence: 1, projection: { nodes: [], runtimeRequests: [], messages: [], runs: [], subagents: [], turnItems: [] } };
+    const requested = (id: string, userMessageId: string, status: string, requestedAt: string) =>
+      event("run.updated", { id, userMessageId, status, requestedAt });
+    const inChannel = (text: string, ts: string, threadTs: string): InboundMessage => ({
+      conversation: { id: "C9", label: "#alerts", meta: { user: "U1" } },
+      ref: { channel: "C9", ts },
+      userId: "U1",
+      userName: "Miro",
+      isDirect: false,
+      mentionsBot: false,
+      text,
+      files: [],
+      replyTo: { channel: "C9", ts: threadTs },
+    });
+    const assistantPosts = (upserts: ReturnType<typeof world>["upserts"]) =>
+      upserts
+        .filter(({ post }) => post.kind === "assistant")
+        .map(({ conversation, post }) => [conversation.id, conversation.threadTs, (post as { markdown: string }).markdown]);
+
+    it("posts as the bot and binds the new Slack thread to the T3 thread", async () => {
+      const { router, upserts, subscribed, opened } = await setup();
+      const result = await router.announce({ channel: "C9", text: "Sentry: checkout errors doubled", threadId: "t-alert", title: "Checkout errors" });
+
+      expect(result).toEqual({
+        ok: true,
+        dryRun: false,
+        channel: "C9",
+        ts: "900.1",
+        threadTs: "900.1",
+        threadId: "t-alert",
+        permalink: "https://team.slack.com/archives/C9/p9001",
+      });
+      expect(upserts).toEqual([
+        {
+          conversation: { id: "C9", label: "<#C9>", meta: { user: "U1", team: "T1" } },
+          post: { kind: "assistant", markdown: "Sentry: checkout errors doubled", streaming: false, images: [] },
+        },
+      ]);
+      expect(router.conversations["C9:900.1"]).toMatchObject({
+        threadId: "t-alert",
+        title: "Checkout errors",
+        conversation: { id: "C9", threadTs: "900.1" },
+        announcedAt: expect.any(String),
+      });
+      expect(subscribed).toEqual(["t-alert"]);
+      expect(opened).toEqual([]);
+      await router.stop();
+    });
+
+    it("routes a reply in the announced Slack thread to the bound T3 thread", async () => {
+      const { router, sent, opened } = await setup();
+      await router.announce({ channel: "C9", text: "Sentry: checkout errors doubled", threadId: "t-alert" });
+      await router.handleMessage(inChannel("Is it the new deploy?", "950.1", "900.1"));
+
+      expect(opened).toEqual([]);
+      expect(sent("t-alert").map((command) => command.text)).toEqual([expect.stringMatching(/Is it the new deploy\?$/)]);
+      await router.stop();
+    });
+
+    it("posts the T3 thread's later output and reports into the announced Slack thread", async () => {
+      const { router, upserts, feed } = await setup();
+      const before = new Date(Date.now() - 60_000).toISOString();
+      await router.announce({ channel: "C9", text: "Sentry: checkout errors doubled", threadId: "t-alert" });
+      await feed("t-alert", snapshot);
+      await feed("t-alert", requested("run-announcing", "m-webhook", "completed", before));
+      await feed("t-alert", reply("a-announcing", "run-announcing", "Announced in Slack."));
+      await feed("t-alert", event("message.updated", { id: "m-timer", scheduledTaskId: "task-1" }));
+      await feed("t-alert", requested("run-timer", "m-timer", "completed", later(500)));
+      await feed("t-alert", reply("a-timer", "run-timer", "Follow-up: errors back to normal"));
+      await feed("t-alert", event("message.updated", { id: "m-report", senderThreadId: "worker-3" }));
+      await feed("t-alert", requested("run-report", "m-report", "completed", later(600)));
+      await feed("t-alert", reply("a-report", "run-report", "Worker found the bad migration"));
+      await settle();
+
+      expect(assistantPosts(upserts)).toEqual([
+        ["C9", undefined, "Sentry: checkout errors doubled"],
+        ["C9", "900.1", "Follow-up: errors back to normal"],
+        ["C9", "900.1", "Worker found the bad migration"],
+      ]);
+      await router.stop();
+    });
+
+    it("refuses channels that are not allowed and channels the bot is not in", async () => {
+      const { router, upserts, subscribed } = await setup({ announceChannels: ["C9", "C11"] });
+      await expect(router.announce({ channel: "C10", text: "Hi", threadId: "t-alert" })).rejects.toThrow(
+        /may not announce to channel C10\. Allowed: C9, C11/,
+      );
+      await expect(router.announce({ channel: "C11", text: "Hi", threadId: "t-alert" })).rejects.toThrow(
+        /not a member of channel C11.*\/invite/,
+      );
+      expect(upserts).toEqual([]);
+      expect(subscribed).toEqual([]);
+      expect(router.conversationCount).toBe(0);
+      await router.stop();
+    });
+
+    it("validates a dry run without posting or binding", async () => {
+      const { router, upserts, subscribed } = await setup();
+      const result = await router.announce({ channel: "C9", text: "Hi", threadId: "t-alert", dryRun: true });
+      expect(result).toMatchObject({ ok: true, dryRun: true, channel: "C9", ts: null });
+      expect(upserts).toEqual([]);
+      expect(subscribed).toEqual([]);
+      await router.stop();
+    });
+
+    it("posts into an existing Slack thread and binds that one", async () => {
+      const { router, upserts, sent } = await setup();
+      const result = await router.announce({ channel: "C9", text: "I looked into this alert", threadId: "t-alert", slackThreadTs: "555.1" });
+
+      expect(result).toMatchObject({ ts: "900.1", threadTs: "555.1", permalink: "https://team.slack.com/archives/C9/p9001" });
+      expect(upserts[0]!.conversation).toMatchObject({ id: "C9", threadTs: "555.1" });
+      expect(router.conversations["C9:555.1"]).toMatchObject({ threadId: "t-alert", conversation: { threadTs: "555.1" } });
+      await router.handleMessage(inChannel("Thanks, roll it back", "556.1", "555.1"));
+      expect(sent("t-alert")).toHaveLength(1);
+
+      await router.announce({ channel: "C9", text: "Rolled back", threadId: "t-alert", slackThreadTs: "555.1" });
+      expect(upserts.at(-1)!.conversation).toMatchObject({ threadTs: "555.1" });
+      await expect(router.announce({ channel: "C9", text: "Again", threadId: "t-alert" })).rejects.toThrow(
+        /already bound to Slack thread 555\.1.*--slack-thread 555\.1/,
+      );
+      await expect(router.announce({ channel: "C9", text: "Other", threadId: "t-other", slackThreadTs: "555.1" })).rejects.toThrow(
+        /already bound to T3 thread t-alert/,
+      );
+      await router.stop();
+    });
+
+    it("keeps the binding across a restart", async () => {
+      const first = await setup();
+      await first.router.announce({ channel: "C9", text: "Sentry: checkout errors doubled", threadId: "t-alert" });
+      await first.router.stop();
+
+      const again = world();
+      const second = await setup({ dataDir: first.dataDir }, again);
+      expect(again.subscribed).toEqual(["t-alert"]);
+      await second.router.handleMessage(inChannel("Any update?", "960.1", "900.1"));
+      expect(second.opened).toEqual([]);
+      expect(again.sent("t-alert")).toHaveLength(1);
+
+      await again.feed("t-alert", requested("run-old", "m-old", "completed", new Date(Date.now() - 60_000).toISOString()));
+      await again.feed("t-alert", reply("a-old", "run-old", "Announced in Slack."));
+      await again.feed("t-alert", requested("run-1", again.sent("t-alert")[0]!.messageId!, "completed", later(100)));
+      await again.feed("t-alert", reply("a-1", "run-1", "Still quiet since the rollback"));
+      await settle();
+      expect(assistantPosts(again.upserts)).toEqual([["C9", "900.1", "Still quiet since the rollback"]]);
+      await second.router.stop();
+    });
   });
 });

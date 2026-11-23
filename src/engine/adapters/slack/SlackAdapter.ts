@@ -15,6 +15,7 @@ import type {
   Question,
   RunStatus,
 } from "../../core/types.ts";
+import { RefusedError } from "../../core/types.ts";
 import type { Logger } from "../../log.ts";
 import {
   ACTION_ANSWER,
@@ -134,6 +135,7 @@ export class SlackAdapter implements ChatAdapter {
   private socket: SocketModeClient | null = null;
   private handlers: AdapterHandlers | null = null;
   private botUserId = "";
+  private teamId = "";
   private readonly userNames = new Map<string, string>();
   /** The workspace's members by name, for turning the agent's `@Name` into a mention. */
   private directory: { readonly names: Directory; readonly at: number } | null = null;
@@ -253,6 +255,7 @@ export class SlackAdapter implements ChatAdapter {
     try {
       const auth = await this.web.auth.test();
       this.botUserId = auth.user_id ?? "";
+      this.teamId = auth.team_id ?? "";
       await socket.start();
       handlers.onStatus({
         state: "connected",
@@ -669,6 +672,34 @@ export class SlackAdapter implements ChatAdapter {
     const id = opened.channel?.id;
     if (!id) throw new Error("Slack did not open a direct message");
     return { id, label: "Direct message" };
+  }
+
+  async announceTarget(channel: string, recipient: string | undefined): Promise<ConversationRef> {
+    const notMember = new RefusedError(
+      `${this.name} is not a member of channel ${channel}. Invite it there with /invite @${this.name}; the bridge does not join channels by itself.`,
+    );
+    const info = await this.web.conversations.info({ channel }).catch((error: unknown) => {
+      if (slackErrorCode(error) === "channel_not_found") throw notMember;
+      throw error;
+    });
+    if (info.channel?.is_member !== true) throw notMember;
+    if (this.teamId === "") this.teamId = (await this.web.auth.test()).team_id ?? "";
+    return {
+      id: channel,
+      label: `<#${channel}>`,
+      meta: {
+        ...(recipient === undefined ? {} : { user: recipient }),
+        ...(this.teamId === "" ? {} : { team: this.teamId }),
+      },
+    };
+  }
+
+  async permalink(message: MessageRef): Promise<string | null> {
+    if (!message.channel || !message.ts) return null;
+    return this.web.chat
+      .getPermalink({ channel: message.channel, message_ts: message.ts })
+      .then((result) => result.permalink ?? null)
+      .catch(() => null);
   }
 
   async setRunStatus(

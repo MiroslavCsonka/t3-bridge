@@ -5,6 +5,7 @@ import { MAX_ACTIVITY, type ActivityEntry } from "./activity.ts";
 import {
   BotRuntime,
   errorText,
+  requestTitle,
   STOP_COMMAND,
   type BotRuntimeOptions,
   type FirstMessage,
@@ -17,6 +18,7 @@ import type {
   InboundMessage,
   MessageRef,
 } from "./types.ts";
+import { RefusedError } from "./types.ts";
 
 export interface ConversationRecord {
   readonly threadId: string;
@@ -25,6 +27,26 @@ export interface ConversationRecord {
   readonly createdAt: string;
   readonly activeAt: string;
   readonly settledAt?: string;
+  readonly announcedAt?: string;
+}
+
+export interface AnnounceRequest {
+  readonly channel: string;
+  readonly text: string;
+  readonly threadId: string;
+  readonly title?: string;
+  readonly slackThreadTs?: string;
+  readonly dryRun?: boolean;
+}
+
+export interface AnnounceResult {
+  readonly ok: true;
+  readonly dryRun: boolean;
+  readonly channel: string;
+  readonly ts: string | null;
+  readonly threadTs: string | null;
+  readonly threadId: string;
+  readonly permalink: string | null;
 }
 
 interface RouterState {
@@ -213,6 +235,85 @@ export class ConversationRouter {
     await this.saveNow();
   }
 
+  async announce(request: AnnounceRequest): Promise<AnnounceResult> {
+    const adapter = this.options.adapter;
+    if (adapter.announceTarget === undefined)
+      throw new RefusedError(`${this.options.platformLabel} bots cannot announce.`);
+    const { channel, threadId, slackThreadTs } = request;
+    const allowed = this.bot.announceChannels ?? [];
+    if (!allowed.includes(channel))
+      throw new RefusedError(
+        `${this.bot.name} may not announce to channel ${channel}. Allowed: ${allowed.join(", ") || "none"}. Add it under "Announce channels" in T3 Bridge.`,
+      );
+    const wanted = slackThreadTs === undefined ? undefined : `${channel}:${slackThreadTs}`;
+    const elsewhere = Object.entries(this.state.conversations).find(
+      ([key, record]) => record.threadId === threadId && record.settledAt === undefined && key !== wanted,
+    );
+    if (elsewhere !== undefined) {
+      const { id, threadTs } = elsewhere[1].conversation;
+      throw new RefusedError(
+        `T3 thread ${threadId} is already bound to Slack thread ${threadTs ?? "?"} in channel ${id}. Post there with --slack-thread ${threadTs ?? "?"}${id === channel ? "" : ` --channel ${id}`}.`,
+      );
+    }
+    const existing = wanted === undefined ? undefined : this.state.conversations[wanted];
+    if (existing !== undefined && existing.threadId !== threadId)
+      throw new RefusedError(
+        `Slack thread ${slackThreadTs} in channel ${channel} is already bound to T3 thread ${existing.threadId}.`,
+      );
+    const target = await adapter.announceTarget(channel, this.bot.allowedUserIds[0]);
+    if (request.dryRun === true)
+      return {
+        ok: true,
+        dryRun: true,
+        channel,
+        ts: null,
+        threadTs: slackThreadTs ?? null,
+        threadId,
+        permalink: null,
+      };
+    const announcedAt = new Date().toISOString();
+    const ref = await adapter.upsert(
+      slackThreadTs === undefined ? target : { ...target, threadTs: slackThreadTs },
+      { kind: "assistant", markdown: request.text, streaming: false, images: [] },
+      null,
+    );
+    const threadTs = slackThreadTs ?? ref.ts;
+    if (!threadTs) throw new Error("Slack did not return the posted message's timestamp.");
+    const key = `${channel}:${threadTs}`;
+    const conversation = { ...target, threadTs };
+    const title = request.title?.trim() || existing?.title || requestTitle(request.text);
+    if (existing === undefined) {
+      this.state.conversations[key] = {
+        threadId,
+        conversation,
+        title,
+        createdAt: announcedAt,
+        activeAt: announcedAt,
+        announcedAt,
+      };
+    } else {
+      const { settledAt: _, ...active } = existing;
+      this.state.conversations[key] = { ...active, activeAt: announcedAt };
+    }
+    this.remember(ref, key);
+    await this.saveNow();
+    await this.open(key, this.state.conversations[key]!.conversation).ready;
+    if (slackThreadTs === undefined)
+      void adapter.setThreadTitle?.(conversation, title).catch(() => {});
+    this.options.log.info(
+      `[${this.bot.name}] Announced T3 thread ${threadId} in Slack thread ${threadTs} of ${channel}`,
+    );
+    return {
+      ok: true,
+      dryRun: false,
+      channel,
+      ts: ref.ts ?? null,
+      threadTs,
+      threadId,
+      permalink: (await adapter.permalink?.(ref)) ?? null,
+    };
+  }
+
   private keyOf(message: InboundMessage): string {
     const known = message.replyTo === null ? undefined : this.lookup(message.replyTo);
     if (known !== undefined) return known;
@@ -241,6 +342,9 @@ export class ConversationRouter {
         threadId: this.state.conversations[key]?.threadId ?? null,
         conversation,
         openThread: (title, first) => this.openThread(key, conversation, title, first),
+        ...(this.state.conversations[key]?.announcedAt === undefined
+          ? {}
+          : { quietBefore: this.state.conversations[key]!.announcedAt! }),
       },
     });
     const session = { runtime, ready: runtime.start() };

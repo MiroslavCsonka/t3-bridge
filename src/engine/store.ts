@@ -26,6 +26,7 @@ export interface BotConfig {
   readonly manifestVersion?: number;
   readonly conversationMode?: ConversationMode;
   readonly settleAfterDays?: number;
+  readonly announceChannels?: ReadonlyArray<string>;
   readonly createdAt: string;
 }
 
