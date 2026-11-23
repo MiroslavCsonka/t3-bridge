@@ -2,7 +2,7 @@ import * as Path from "node:path";
 
 import { readJson, writeJsonAtomic } from "../store.ts";
 import { MAX_ACTIVITY, type ActivityEntry } from "./activity.ts";
-import { recordFeedback } from "./feedback.ts";
+import { emojiName, reactionNote, recordFeedback } from "./feedback.ts";
 import {
   BotRuntime,
   errorText,
@@ -75,6 +75,7 @@ interface Session {
 
 const MAX_MESSAGES = 5000;
 const SETTLE_CHECK_MS = 60 * 60_000;
+const REACTION_DEBOUNCE_MS = 10 * 60_000;
 
 export class ConversationRouter {
   private state: RouterState = { conversations: {}, messages: {} };
@@ -82,6 +83,7 @@ export class ConversationRouter {
   private saveTimer: NodeJS.Timeout | null = null;
   private settleTimer: NodeJS.Timeout | null = null;
   private stopped = false;
+  private readonly reactedAt = new Map<string, number>();
   private ownError: string | null = null;
   adapterStatus: AdapterStatus = { state: "connecting" };
 
@@ -195,7 +197,11 @@ export class ConversationRouter {
       const { settledAt: _, ...active } = record;
       this.state.conversations[key] = active;
     }
-    const session = this.open(key, record?.conversation ?? this.conversationOf(message));
+    await this.deliver(key, record?.conversation ?? this.conversationOf(message), message);
+  }
+
+  private async deliver(key: string, conversation: ConversationRef, message: InboundMessage) {
+    const session = this.open(key, conversation);
     this.remember(message.ref, key);
     this.touch(key);
     await session.ready;
@@ -216,16 +222,50 @@ export class ConversationRouter {
   }
 
   async handleReaction(reaction: InboundReaction): Promise<void> {
-    await recordFeedback({
+    let key = "";
+    let userName: string | undefined;
+    const entry = await recordFeedback({
       dataDir: this.options.dataDir,
       bot: this.bot,
-      reaction,
+      reaction: {
+        ...reaction,
+        details: async () => {
+          const details = await reaction.details();
+          userName = details.userName;
+          return details;
+        },
+      },
       threadIdOf: (threadTs) => {
-        const key =
+        key =
           this.lookup({ channel: reaction.channel, ts: reaction.messageTs }) ??
           `${reaction.channel}:${threadTs ?? reaction.messageTs}`;
         return this.state.conversations[key]?.threadId ?? null;
       },
+    });
+    const record = this.state.conversations[key];
+    if (entry === null || entry.change !== "added" || entry.threadId === null || record === undefined) return;
+    const note = reactionNote(entry, userName ?? entry.userId);
+    if (note === null) return;
+    const repeat = `${entry.channel}:${entry.messageTs}:${emojiName(entry.reaction)}`;
+    const now = Date.now();
+    if (now - (this.reactedAt.get(repeat) ?? -Infinity) < REACTION_DEBOUNCE_MS) return;
+    this.reactedAt.set(repeat, now);
+    for (const [seen, at] of this.reactedAt) if (now - at >= REACTION_DEBOUNCE_MS) this.reactedAt.delete(seen);
+    if (record.settledAt !== undefined) {
+      const { settledAt: _, ...active } = record;
+      this.state.conversations[key] = active;
+    }
+    const ref = { channel: entry.channel, ts: entry.messageTs };
+    await this.deliver(key, record.conversation, {
+      conversation: record.conversation,
+      ref,
+      userId: entry.userId,
+      userName: userName ?? entry.userId,
+      isDirect: false,
+      mentionsBot: false,
+      text: note,
+      files: [],
+      replyTo: ref,
     });
   }
 

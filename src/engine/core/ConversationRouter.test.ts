@@ -90,6 +90,7 @@ async function setup(
     gate?: Promise<void>;
     platform?: BotConfig["platform"];
     announceChannels?: ReadonlyArray<string>;
+    reactionCategories?: BotConfig["reactionCategories"];
   } = {},
   shared: ReturnType<typeof world> = world(),
 ) {
@@ -109,6 +110,7 @@ async function setup(
     reminder: false,
     conversationMode: "per-thread",
     announceChannels: options.announceChannels ?? ["C9"],
+    ...(options.reactionCategories === undefined ? {} : { reactionCategories: options.reactionCategories }),
     createdAt: new Date().toISOString(),
   };
   const router = new ConversationRouter({
@@ -553,6 +555,127 @@ describe("ConversationRouter", () => {
         ["777.1", null, "Developer"],
       ]);
       await router.stop();
+    });
+
+    const react = (
+      emoji: string,
+      channel: string,
+      messageTs: string,
+      threadTs: string | null,
+      change: "added" | "removed" = "added",
+    ): InboundReaction => ({
+      at: "2026-11-23T10:00:00.000Z",
+      channel,
+      messageTs,
+      reaction: emoji,
+      userId: "U1",
+      change,
+      details: async () => ({ threadTs, permalink: null, text: `Alert in ${channel}: disk is 91% full`, userName: "Miro" }),
+    });
+    const announced = async (options: Parameters<typeof setup>[0] = {}) => {
+      const harness = await setup({ announceChannels: ["C9", "C10"], ...options });
+      await harness.router.announce({ channel: "C9", text: "Alert in C9: disk is 91% full", threadId: "t-disk" });
+      await harness.router.announce({ channel: "C10", text: "Alert in C10: disk is 91% full", threadId: "t-db" });
+      return harness;
+    };
+    const notes = (harness: Awaited<ReturnType<typeof announced>>, threadId: string) =>
+      harness.sent(threadId).map((command) => command.text!.slice(command.text!.indexOf("\n") + 1));
+
+    it("tells the bound T3 thread about too_noisy, wrong, escalate and ack reactions", async () => {
+      const harness = await announced();
+      await harness.router.handleReaction(react("mute", "C9", "900.1", null));
+      await harness.router.handleReaction(react("eyes::skin-tone-2", "C10", "900.2", null));
+      await harness.router.handleReaction(react("x", "C10", "900.2", null));
+      await harness.router.handleReaction(react("rotating_light", "C9", "900.1", null));
+
+      expect(notes(harness, "t-disk")).toEqual([
+        '[Slack reaction · Miro reacted :mute: (too_noisy) to your message "Alert in C9: disk is 91% full"]\n' +
+          "Stop posting about this issue unless it becomes urgent; record the mute in ~/ops-notes/known-issues.md.",
+        '[Slack reaction · Miro reacted :rotating_light: (escalate) to your message "Alert in C9: disk is 91% full"]\n' +
+          "Treat as urgent: re-investigate now and post an update in this Slack thread regardless of the daily cap.",
+      ]);
+      expect(notes(harness, "t-db")).toEqual([
+        '[Slack reaction · Miro reacted :eyes: (ack) to your message "Alert in C10: disk is 91% full"]\n' +
+          "A human is handling this; don't send reminders or follow-up nudges about it. Reply NO_REPLY.",
+        '[Slack reaction · Miro reacted :x: (wrong) to your message "Alert in C10: disk is 91% full"]\n' +
+          "Re-check the claim in that message read-only; if it was wrong, post a short correction in this Slack thread; otherwise reply NO_REPLY.",
+      ]);
+      expect(harness.sent("t-disk")[0]!.text).toMatch(/^\[Slack · Miro · /);
+      expect(harness.opened).toEqual([]);
+      await harness.router.stop();
+    });
+
+    it("routes the thread's answer back to the reacted Slack thread and keeps NO_REPLY quiet", async () => {
+      const harness = await announced();
+      await harness.feed("t-disk", { kind: "snapshot", snapshotSequence: 1, projection: { nodes: [], runtimeRequests: [], messages: [], runs: [], subagents: [], turnItems: [] } });
+      await harness.router.handleReaction(react("thinking_face", "C9", "901.5", "900.1"));
+      await harness.router.handleReaction(react("eyes", "C9", "901.5", "900.1"));
+      const [wrong, ack] = harness.sent("t-disk");
+      const requested = (id: string, messageId: string, ms: number) =>
+        event("run.updated", { id, userMessageId: messageId, status: "completed", requestedAt: later(ms) });
+      await harness.feed("t-disk", requested("run-wrong", wrong!.messageId!, 100));
+      await harness.feed("t-disk", reply("a-wrong", "run-wrong", "Correction: it is 81%, not 91%."));
+      await harness.feed("t-disk", requested("run-ack", ack!.messageId!, 200));
+      await harness.feed("t-disk", reply("a-ack", "run-ack", "NO_REPLY"));
+      await settle();
+
+      expect(
+        harness.upserts
+          .filter(({ post }) => post.kind === "assistant")
+          .map(({ conversation, post }) => [conversation.id, conversation.threadTs, (post as { markdown: string }).markdown]),
+      ).toEqual([
+        ["C9", undefined, "Alert in C9: disk is 91% full"],
+        ["C10", undefined, "Alert in C10: disk is 91% full"],
+        ["C9", "900.1", "Correction: it is 81%, not 91%."],
+      ]);
+      await harness.router.stop();
+    });
+
+    it("only logs reactions on unbound messages, removals and logged-only categories", async () => {
+      const harness = await announced();
+      await harness.router.handleReaction(react("mute", "C9", "777.1", null));
+      await harness.router.handleReaction(react("mute", "C9", "900.1", null, "removed"));
+      for (const emoji of ["+1", "-1", "nerd_face", "octopus"])
+        await harness.router.handleReaction(react(emoji, "C9", "900.1", null));
+
+      expect(harness.sent("t-disk")).toEqual([]);
+      expect(harness.opened).toEqual([]);
+      expect((await recorded(harness.dataDir)).map((entry) => [entry.reaction, entry.category, entry.change, entry.threadId])).toEqual([
+        ["mute", "too_noisy", "added", null],
+        ["mute", "too_noisy", "removed", "t-disk"],
+        ["+1", "useful", "added", "t-disk"],
+        ["-1", "not_useful", "added", "t-disk"],
+        ["nerd_face", "too_technical", "added", "t-disk"],
+        ["octopus", "other", "added", "t-disk"],
+      ]);
+      await harness.router.stop();
+    });
+
+    it("acts once on the same emoji repeated on a message, but on each different one", async () => {
+      const harness = await announced();
+      await harness.router.handleReaction(react("mute", "C9", "900.1", null));
+      await harness.router.handleReaction(react("mute", "C9", "900.1", null, "removed"));
+      await harness.router.handleReaction(react("mute::skin-tone-3", "C9", "900.1", null));
+      await harness.router.handleReaction(react("zzz", "C9", "900.1", null));
+      await harness.router.handleReaction(react("mute", "C10", "900.2", null));
+
+      expect(notes(harness, "t-disk").map((note) => /:(\w+): \(/.exec(note)![1])).toEqual(["mute", "zzz"]);
+      expect(notes(harness, "t-db").map((note) => /:(\w+): \(/.exec(note)![1])).toEqual(["mute"]);
+      expect(await recorded(harness.dataDir)).toHaveLength(5);
+      await harness.router.stop();
+    });
+
+    it("follows the bot's own category map", async () => {
+      const harness = await announced({ reactionCategories: { escalate: ["octopus"], useful: ["mute"] } });
+      await harness.router.handleReaction(react("octopus", "C9", "900.1", null));
+      await harness.router.handleReaction(react("mute", "C9", "900.1", null));
+      await harness.router.handleReaction(react("rotating_light", "C9", "900.1", null));
+
+      expect(notes(harness, "t-disk")).toEqual([
+        '[Slack reaction · Miro reacted :octopus: (escalate) to your message "Alert in C9: disk is 91% full"]\n' +
+          "Treat as urgent: re-investigate now and post an update in this Slack thread regardless of the daily cap.",
+      ]);
+      await harness.router.stop();
     });
   });
 });
