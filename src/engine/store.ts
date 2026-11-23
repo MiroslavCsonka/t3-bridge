@@ -6,6 +6,8 @@ import type { LocalEnvironmentOptions } from "./t3/localEnvironment.ts";
 
 export type Platform = "slack" | "discord" | "telegram";
 
+export type ConversationMode = "single" | "per-thread";
+
 export interface BotConfig {
   readonly id: string;
   readonly name: string;
@@ -22,6 +24,8 @@ export interface BotConfig {
   readonly account?: { readonly username: string; readonly applicationId?: string };
   /** Which version of the Slack manifest the app was last set up with; see MANIFEST_VERSION. */
   readonly manifestVersion?: number;
+  readonly conversationMode?: ConversationMode;
+  readonly settleAfterDays?: number;
   readonly createdAt: string;
 }
 

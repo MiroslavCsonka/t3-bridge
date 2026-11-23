@@ -69,7 +69,7 @@ export type InboundAction =
       readonly requestId: string;
       readonly answers: Readonly<Record<string, string | ReadonlyArray<string>>>;
     }
-  | { readonly type: "stop"; readonly userId: string };
+  | { readonly type: "stop"; readonly userId: string; readonly message?: MessageRef };
 
 export interface ImageRef {
   readonly name: string;

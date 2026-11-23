@@ -185,10 +185,22 @@ export class SlackAdapter implements ChatAdapter {
     );
     socket.on(
       "reaction_added",
-      ({ ack, event }: { ack: () => Promise<void>; event: { user: string; reaction: string } }) => {
+      ({
+        ack,
+        event,
+      }: {
+        ack: () => Promise<void>;
+        event: { user: string; reaction: string; item?: { channel?: string; ts?: string } };
+      }) => {
         void ack();
         if (STOP_REACTIONS.has(event.reaction) && event.user !== this.botUserId) {
-          void this.handlers?.onAction({ type: "stop", userId: event.user });
+          void this.handlers?.onAction({
+            type: "stop",
+            userId: event.user,
+            ...(event.item?.channel && event.item.ts
+              ? { message: { channel: event.item.channel, ts: event.item.ts } }
+              : {}),
+          });
         }
       },
     );
@@ -197,10 +209,21 @@ export class SlackAdapter implements ChatAdapter {
     // Slack's own Stop button, shown while the agent session is processing.
     socket.on(
       "agent_session_stopped",
-      ({ ack, event }: { ack: () => Promise<void>; event: { user?: string } }) => {
+      ({
+        ack,
+        event,
+      }: {
+        ack: () => Promise<void>;
+        event: { user?: string; channel?: string; channel_id?: string; thread_ts?: string };
+      }) => {
         void ack();
+        const channel = event.channel_id ?? event.channel;
         if (event.user && event.user !== this.botUserId) {
-          void this.handlers?.onAction({ type: "stop", userId: event.user });
+          void this.handlers?.onAction({
+            type: "stop",
+            userId: event.user,
+            ...(channel && event.thread_ts ? { message: { channel, ts: event.thread_ts } } : {}),
+          });
         }
       },
     );

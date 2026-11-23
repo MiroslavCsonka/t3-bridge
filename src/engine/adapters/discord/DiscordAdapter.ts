@@ -394,9 +394,20 @@ export class DiscordAdapter implements ChatAdapter {
         );
         return;
       case "MESSAGE_REACTION_ADD": {
-        const reaction = data as { user_id: string; emoji: { name?: string | null } };
+        const reaction = data as {
+          user_id: string;
+          channel_id?: string;
+          message_id?: string;
+          emoji: { name?: string | null };
+        };
         if (reaction.user_id !== this.botUserId && STOP_EMOJI.has(reaction.emoji.name ?? "")) {
-          void this.handlers?.onAction({ type: "stop", userId: reaction.user_id });
+          void this.handlers?.onAction({
+            type: "stop",
+            userId: reaction.user_id,
+            ...(reaction.channel_id && reaction.message_id
+              ? { message: { channel: reaction.channel_id, ts: reaction.message_id } }
+              : {}),
+          });
         }
         return;
       }
@@ -444,10 +455,15 @@ export class DiscordAdapter implements ChatAdapter {
       const body = (snapshot.message.content ?? "").trim() || "(no text)";
       return ["Forwarded message:", ...body.split("\n").map((line) => `> ${line}`)].join("\n");
     });
+    const inThread =
+      !isDirect &&
+      mentionsBot &&
+      (await this.isThread(message.channel_id).catch(() => false));
     const inbound: InboundMessage = {
       conversation: {
         id: message.channel_id,
         label: isDirect ? "Direct message" : `<#${message.channel_id}>`,
+        ...(inThread ? { meta: { thread: message.channel_id } } : {}),
       },
       ref: { channel: message.channel_id, ts: message.id },
       userId: message.author.id,
@@ -477,18 +493,22 @@ export class DiscordAdapter implements ChatAdapter {
     await this.handlers?.onMessage(inbound);
   }
 
+  private async isThread(channelId: string): Promise<boolean> {
+    let isThread = this.threadChannels.get(channelId);
+    if (isThread === undefined) {
+      const channel = await this.request<{ type: number }>("GET", `/channels/${channelId}`);
+      isThread = THREAD_TYPES.has(channel.type);
+      this.threadChannels.set(channelId, isThread);
+    }
+    return isThread;
+  }
+
   /**
    * When the bot is mentioned in a thread, what was said there since it last spoke, oldest
    * first, starting with the message the thread was opened on. Nothing outside threads.
    */
   private async missedInThread(message: DiscordMessage): Promise<EarlierMessage[]> {
-    let isThread = this.threadChannels.get(message.channel_id);
-    if (isThread === undefined) {
-      const channel = await this.request<{ type: number }>("GET", `/channels/${message.channel_id}`);
-      isThread = THREAD_TYPES.has(channel.type);
-      this.threadChannels.set(message.channel_id, isThread);
-    }
-    if (!isThread) return [];
+    if (!(await this.isThread(message.channel_id))) return [];
     // Newest first.
     const recent = await this.request<DiscordMessage[]>(
       "GET",
