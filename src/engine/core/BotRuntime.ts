@@ -49,6 +49,7 @@ import {
   newActivity,
   type ActivityEntry,
 } from "./activity.ts";
+import { recordFeedback } from "./feedback.ts";
 import { truncate } from "./markdown.ts";
 import { forgetFact, rememberedFacts, rememberFact } from "./memory.ts";
 import {
@@ -299,6 +300,13 @@ export class BotRuntime {
         await this.options.adapter.start({
           onMessage: (message) => this.handleMessage(message),
           onAction: (action) => this.handleAction(action),
+          onReaction: (reaction) =>
+            recordFeedback({
+              dataDir: this.options.dataDir,
+              bot: this.bot,
+              reaction,
+              threadIdOf: () => this.threadId,
+            }).then(() => {}),
           onStatus: (status) => {
             this.adapterStatus = status;
           },

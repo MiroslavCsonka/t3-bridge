@@ -2,6 +2,7 @@ import * as Path from "node:path";
 
 import { readJson, writeJsonAtomic } from "../store.ts";
 import { MAX_ACTIVITY, type ActivityEntry } from "./activity.ts";
+import { recordFeedback } from "./feedback.ts";
 import {
   BotRuntime,
   errorText,
@@ -16,6 +17,7 @@ import type {
   ConversationRef,
   InboundAction,
   InboundMessage,
+  InboundReaction,
   MessageRef,
 } from "./types.ts";
 import { RefusedError } from "./types.ts";
@@ -143,6 +145,7 @@ export class ConversationRouter {
         await this.options.adapter.start({
           onMessage: (message) => this.handleMessage(message),
           onAction: (action) => this.handleAction(action),
+          onReaction: (reaction) => this.handleReaction(reaction),
           onStatus: (status) => {
             this.adapterStatus = status;
           },
@@ -210,6 +213,20 @@ export class ConversationRouter {
     }
     const owner = sessions.find((session) => session.runtime.watches(action.threadId)) ?? sessions[0];
     await owner?.runtime.handleAction(action);
+  }
+
+  async handleReaction(reaction: InboundReaction): Promise<void> {
+    await recordFeedback({
+      dataDir: this.options.dataDir,
+      bot: this.bot,
+      reaction,
+      threadIdOf: (threadTs) => {
+        const key =
+          this.lookup({ channel: reaction.channel, ts: reaction.messageTs }) ??
+          `${reaction.channel}:${threadTs ?? reaction.messageTs}`;
+        return this.state.conversations[key]?.threadId ?? null;
+      },
+    });
   }
 
   async stopThread() {

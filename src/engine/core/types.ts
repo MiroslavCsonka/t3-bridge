@@ -161,9 +161,24 @@ export type OutboundPost =
   | { readonly kind: "error"; readonly message: string }
   | { readonly kind: "notice"; readonly markdown: string };
 
+export interface InboundReaction {
+  readonly at: string;
+  readonly channel: string;
+  readonly messageTs: string;
+  readonly reaction: string;
+  readonly userId: string;
+  readonly change: "added" | "removed";
+  readonly details: () => Promise<{
+    readonly threadTs: string | null;
+    readonly permalink: string | null;
+    readonly text: string | null;
+  }>;
+}
+
 export interface AdapterHandlers {
   readonly onMessage: (message: InboundMessage) => Promise<void>;
   readonly onAction: (action: InboundAction) => Promise<void>;
+  readonly onReaction?: (reaction: InboundReaction) => Promise<void>;
   readonly onStatus: (status: AdapterStatus) => void;
 }
 

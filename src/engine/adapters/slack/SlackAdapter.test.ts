@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { InboundMessage } from "../../core/types.ts";
+import type { InboundMessage, InboundReaction } from "../../core/types.ts";
 import { makeLogger } from "../../log.ts";
 import { SlackAdapter } from "./SlackAdapter.ts";
 
@@ -648,5 +648,110 @@ describe("SlackAdapter.announceTarget", () => {
   it("links to a posted message", async () => {
     const { adapter } = setup();
     expect(await adapter.permalink({ channel: "C1", ts: "1.000" })).toBe("https://x.slack.com/archives/C1/p1");
+  });
+});
+
+describe("SlackAdapter feedback reactions", () => {
+  function withReactions() {
+    const harness = setup();
+    const reactions: InboundReaction[] = [];
+    const lookups: Array<{ method: string; args: Record<string, unknown> }> = [];
+    const internals = harness.adapter as unknown as {
+      handlers: Record<string, unknown>;
+      web: Record<string, unknown>;
+      onReaction: (event: unknown, change: "added" | "removed") => void;
+    };
+    internals.handlers = {
+      ...internals.handlers,
+      onReaction: async (reaction: InboundReaction) => void reactions.push(reaction),
+    };
+    internals.web = {
+      ...internals.web,
+      chat: {
+        getPermalink: async ({ message_ts }: { message_ts: string }) => ({
+          permalink:
+            message_ts === "300.1"
+              ? "https://x.slack.com/archives/C9/p3001"
+              : `https://x.slack.com/archives/C9/p${message_ts.replace(".", "")}?thread_ts=300.1&cid=C9`,
+        }),
+      },
+      conversations: {
+        history: async (args: Record<string, unknown>) => {
+          lookups.push({ method: "history", args });
+          return { messages: [{ ts: args.latest, text: "Deploy finished" }] };
+        },
+        replies: async (args: Record<string, unknown>) => {
+          lookups.push({ method: "replies", args });
+          return { messages: [{ ts: args.latest, text: "Disk is 91% full" }] };
+        },
+      },
+    };
+    const react = (event: Record<string, unknown>, change: "added" | "removed" = "added") =>
+      internals.onReaction(
+        {
+          user: "U1",
+          reaction: "+1",
+          item_user: "UBOT",
+          event_ts: "400.1",
+          item: { type: "message", channel: "C9", ts: "300.2" },
+          ...event,
+        },
+        change,
+      );
+    return { reactions, lookups, react };
+  }
+
+  it("passes on thumbs added to and removed from the bot's messages, with the reply's thread", async () => {
+    const { reactions, lookups, react } = withReactions();
+    react({ reaction: "thumbsup::skin-tone-4" });
+    react({ reaction: "thumbsup::skin-tone-4", event_ts: "400.2" }, "removed");
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(reactions.map(({ details: _, at: __, ...rest }) => rest)).toEqual([
+      { channel: "C9", messageTs: "300.2", reaction: "thumbsup::skin-tone-4", userId: "U1", change: "added" },
+      { channel: "C9", messageTs: "300.2", reaction: "thumbsup::skin-tone-4", userId: "U1", change: "removed" },
+    ]);
+    expect(await reactions[0]!.details()).toEqual({
+      threadTs: "300.1",
+      permalink: "https://x.slack.com/archives/C9/p3002?thread_ts=300.1&cid=C9",
+      text: "Disk is 91% full",
+    });
+    expect(lookups[0]).toEqual({
+      method: "replies",
+      args: { channel: "C9", ts: "300.1", oldest: "300.2", latest: "300.2", inclusive: true, limit: 1 },
+    });
+  });
+
+  it("reads a top-level message from the channel history", async () => {
+    const { reactions, react } = withReactions();
+    react({ reaction: "-1", item: { type: "message", channel: "C9", ts: "300.1" } });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(await reactions[0]!.details()).toEqual({
+      threadTs: null,
+      permalink: "https://x.slack.com/archives/C9/p3001",
+      text: "Deploy finished",
+    });
+  });
+
+  it("ignores the bot's own reactions, other authors' messages, files and other emoji", async () => {
+    const { reactions, react } = withReactions();
+    react({ user: "UBOT" });
+    react({ item_user: "U2" });
+    react({ item: { type: "file", channel: "C9", ts: "300.2" } });
+    react({ reaction: "eyes" });
+    react({ reaction: "octagonal_sign" });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(reactions).toEqual([]);
+  });
+
+  it("passes on a redelivered event only once", async () => {
+    const { reactions, react } = withReactions();
+    react({});
+    react({});
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(reactions).toHaveLength(1);
   });
 });

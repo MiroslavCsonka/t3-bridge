@@ -32,6 +32,7 @@ import {
   withoutMarkdownBlocks,
   type Block,
 } from "./blocks.ts";
+import { isFeedbackReaction } from "../../core/feedback.ts";
 import { reportPreview, reportTitle } from "../../core/markdown.ts";
 import { notificationText, splitSlackMarkdown } from "./format.ts";
 import {
@@ -125,6 +126,14 @@ interface SlackEventMessage {
   files?: SlackFile[];
 }
 
+interface SlackReactionEvent {
+  user: string;
+  reaction: string;
+  item_user?: string;
+  event_ts?: string;
+  item?: { type?: string; channel?: string; ts?: string };
+}
+
 /**
  * Slack over Socket Mode, so the bridge needs no public URL. Each bot is its own Slack app
  * with its own pair of tokens.
@@ -187,13 +196,7 @@ export class SlackAdapter implements ChatAdapter {
     );
     socket.on(
       "reaction_added",
-      ({
-        ack,
-        event,
-      }: {
-        ack: () => Promise<void>;
-        event: { user: string; reaction: string; item?: { channel?: string; ts?: string } };
-      }) => {
+      ({ ack, event }: { ack: () => Promise<void>; event: SlackReactionEvent }) => {
         void ack();
         if (STOP_REACTIONS.has(event.reaction) && event.user !== this.botUserId) {
           void this.handlers?.onAction({
@@ -204,6 +207,14 @@ export class SlackAdapter implements ChatAdapter {
               : {}),
           });
         }
+        this.onReaction(event, "added");
+      },
+    );
+    socket.on(
+      "reaction_removed",
+      ({ ack, event }: { ack: () => Promise<void>; event: SlackReactionEvent }) => {
+        void ack();
+        this.onReaction(event, "removed");
       },
     );
     // Delivered because agent apps must subscribe to it; acknowledged so Slack doesn't resend it.
@@ -285,6 +296,50 @@ export class SlackAdapter implements ChatAdapter {
   }
 
   // ── inbound ─────────────────────────────────────────────────────────────
+
+  private onReaction(event: SlackReactionEvent, change: "added" | "removed") {
+    const { item } = event;
+    if (
+      !this.botUserId ||
+      event.user === this.botUserId ||
+      event.item_user !== this.botUserId ||
+      item?.type !== "message" ||
+      !item.channel ||
+      !item.ts ||
+      !isFeedbackReaction(event.reaction)
+    )
+      return;
+    const eventKey = `reaction:${change}:${event.user}:${item.channel}:${item.ts}:${event.reaction}:${event.event_ts ?? ""}`;
+    if (this.seenEvents.has(eventKey)) return;
+    this.seenEvents.set(eventKey, Date.now());
+    const channel = item.channel;
+    const messageTs = item.ts;
+    void this.handlers
+      ?.onReaction?.({
+        at: new Date().toISOString(),
+        channel,
+        messageTs,
+        reaction: event.reaction,
+        userId: event.user,
+        change,
+        details: async () => {
+          const permalink = await this.permalink({ channel, ts: messageTs });
+          const threadTs = permalinkThreadTs(permalink);
+          return { threadTs, permalink, text: await this.messageText(channel, messageTs, threadTs) };
+        },
+      })
+      .catch((error: unknown) => this.log.error(`[${this.name}] Slack reaction`, error));
+  }
+
+  private async messageText(channel: string, ts: string, threadTs: string | null) {
+    const window = { channel, oldest: ts, latest: ts, inclusive: true, limit: 1 };
+    const result = await (threadTs === null
+      ? this.web.conversations.history(window)
+      : this.web.conversations.replies({ ...window, ts: threadTs })
+    ).catch(() => null);
+    const message = result?.messages?.find((candidate) => candidate.ts === ts);
+    return message?.text ?? null;
+  }
 
   private async onMessage(event: SlackEventMessage) {
     if (event.bot_id || !event.user || event.user === this.botUserId) return;
@@ -1306,4 +1361,13 @@ function isUnsupported(error: unknown) {
 
 export function slackErrorCode(error: unknown): string | undefined {
   return (error as { data?: { error?: string } })?.data?.error;
+}
+
+function permalinkThreadTs(permalink: string | null): string | null {
+  if (permalink === null) return null;
+  try {
+    return new URL(permalink).searchParams.get("thread_ts");
+  } catch {
+    return null;
+  }
 }

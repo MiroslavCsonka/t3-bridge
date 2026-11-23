@@ -8,7 +8,14 @@ import { makeLogger } from "../log.ts";
 import type { BotConfig } from "../store.ts";
 import type { T3Client } from "../t3/T3Client.ts";
 import { ConversationRouter } from "./ConversationRouter.ts";
-import { RefusedError, type ChatAdapter, type ConversationRef, type InboundMessage, type OutboundPost } from "./types.ts";
+import {
+  RefusedError,
+  type ChatAdapter,
+  type ConversationRef,
+  type InboundMessage,
+  type InboundReaction,
+  type OutboundPost,
+} from "./types.ts";
 
 const dirs: string[] = [];
 afterEach(async () => {
@@ -513,6 +520,39 @@ describe("ConversationRouter", () => {
       await settle();
       expect(assistantPosts(again.upserts)).toEqual([["C9", "900.1", "Still quiet since the rollback"]]);
       await second.router.stop();
+    });
+  });
+
+  describe("feedback reactions", () => {
+    const thumb = (messageTs: string, threadTs: string | null, userId = "U1"): InboundReaction => ({
+      at: "2026-11-23T10:00:00.000Z",
+      channel: "C9",
+      messageTs,
+      reaction: "+1",
+      userId,
+      change: "added",
+      details: async () => ({ threadTs, permalink: null, text: "Sentry: checkout errors doubled" }),
+    });
+    const recorded = async (dataDir: string) =>
+      (await FS.readFile(Path.join(dataDir, "feedback.jsonl"), "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+
+    it("records the T3 thread bound to the reacted message's Slack thread", async () => {
+      const { router, dataDir } = await setup();
+      await router.announce({ channel: "C9", text: "Sentry: checkout errors doubled", threadId: "t-alert" });
+      await router.handleReaction(thumb("900.1", null));
+      await router.handleReaction(thumb("901.5", "900.1"));
+      await router.handleReaction(thumb("777.1", null));
+      await router.handleReaction(thumb("900.1", null, "U2"));
+
+      expect((await recorded(dataDir)).map((entry) => [entry.messageTs, entry.threadId, entry.botName])).toEqual([
+        ["900.1", "t-alert", "Developer"],
+        ["901.5", "t-alert", "Developer"],
+        ["777.1", null, "Developer"],
+      ]);
+      await router.stop();
     });
   });
 });
