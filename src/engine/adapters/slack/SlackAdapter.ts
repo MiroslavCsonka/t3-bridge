@@ -32,7 +32,6 @@ import {
   withoutMarkdownBlocks,
   type Block,
 } from "./blocks.ts";
-import { isFeedbackReaction } from "../../core/feedback.ts";
 import { reportPreview, reportTitle } from "../../core/markdown.ts";
 import { notificationText, splitSlackMarkdown } from "./format.ts";
 import {
@@ -306,7 +305,7 @@ export class SlackAdapter implements ChatAdapter {
       item?.type !== "message" ||
       !item.channel ||
       !item.ts ||
-      !isFeedbackReaction(event.reaction)
+      STOP_REACTIONS.has(event.reaction)
     )
       return;
     const eventKey = `reaction:${change}:${event.user}:${item.channel}:${item.ts}:${event.reaction}:${event.event_ts ?? ""}`;
@@ -314,18 +313,24 @@ export class SlackAdapter implements ChatAdapter {
     this.seenEvents.set(eventKey, Date.now());
     const channel = item.channel;
     const messageTs = item.ts;
+    const userId = event.user;
     void this.handlers
       ?.onReaction?.({
         at: new Date().toISOString(),
         channel,
         messageTs,
         reaction: event.reaction,
-        userId: event.user,
+        userId,
         change,
         details: async () => {
           const permalink = await this.permalink({ channel, ts: messageTs });
           const threadTs = permalinkThreadTs(permalink);
-          return { threadTs, permalink, text: await this.messageText(channel, messageTs, threadTs) };
+          return {
+            threadTs,
+            permalink,
+            text: await this.messageText(channel, messageTs, threadTs),
+            userName: await this.userName(userId),
+          };
         },
       })
       .catch((error: unknown) => this.log.error(`[${this.name}] Slack reaction`, error));

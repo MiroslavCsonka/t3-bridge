@@ -715,6 +715,7 @@ describe("SlackAdapter feedback reactions", () => {
       threadTs: "300.1",
       permalink: "https://x.slack.com/archives/C9/p3002?thread_ts=300.1&cid=C9",
       text: "Disk is 91% full",
+      userName: "Riza",
     });
     expect(lookups[0]).toEqual({
       method: "replies",
@@ -731,19 +732,21 @@ describe("SlackAdapter feedback reactions", () => {
       threadTs: null,
       permalink: "https://x.slack.com/archives/C9/p3001",
       text: "Deploy finished",
+      userName: "Riza",
     });
   });
 
-  it("ignores the bot's own reactions, other authors' messages, files and other emoji", async () => {
+  it("passes on any emoji but ignores the bot's own reactions, other authors' messages, files and stop signs", async () => {
     const { reactions, react } = withReactions();
     react({ user: "UBOT" });
     react({ item_user: "U2" });
     react({ item: { type: "file", channel: "C9", ts: "300.2" } });
-    react({ reaction: "eyes" });
     react({ reaction: "octagonal_sign" });
+    react({ reaction: "eyes" });
+    react({ reaction: "party_parrot", event_ts: "400.3" });
     await new Promise((resolve) => setImmediate(resolve));
 
-    expect(reactions).toEqual([]);
+    expect(reactions.map((reaction) => reaction.reaction)).toEqual(["eyes", "party_parrot"]);
   });
 
   it("passes on a redelivered event only once", async () => {

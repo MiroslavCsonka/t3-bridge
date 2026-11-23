@@ -27,6 +27,7 @@ export interface BotConfig {
   readonly conversationMode?: ConversationMode;
   readonly settleAfterDays?: number;
   readonly announceChannels?: ReadonlyArray<string>;
+  readonly reactionCategories?: Readonly<Record<string, ReadonlyArray<string>>>;
   readonly createdAt: string;
 }
 

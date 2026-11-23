@@ -5,7 +5,15 @@ import * as Path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { BotConfig } from "../store.ts";
-import { feedbackFile, isFeedbackReaction, recordFeedback } from "./feedback.ts";
+import {
+  DEFAULT_REACTION_CATEGORIES,
+  feedbackFile,
+  reactionCategoriesOf,
+  reactionCategory,
+  reactionNote,
+  recordFeedback,
+  type FeedbackEntry,
+} from "./feedback.ts";
 import type { InboundReaction } from "./types.ts";
 
 const dirs: string[] = [];
@@ -60,12 +68,78 @@ async function lines(dir: string) {
     .map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
-describe("isFeedbackReaction", () => {
-  it("accepts thumbs up and down with any skin tone", () => {
-    for (const name of ["+1", "-1", "thumbsup", "thumbsdown", "+1::skin-tone-2", "thumbsdown::skin-tone-6"])
-      expect(isFeedbackReaction(name)).toBe(true);
-    for (const name of ["eyes", "white_check_mark", "+1::skin-tone-9", "heavy_plus_sign", "thumbsup_all"])
-      expect(isFeedbackReaction(name)).toBe(false);
+describe("reactionCategory", () => {
+  it("sorts the default emoji into their categories, ignoring skin tones and colons", () => {
+    expect(
+      ["+1", "thumbsup::skin-tone-4", "heart", "100", "white_check_mark", ":tada:", "raised_hands::skin-tone-2"].map(
+        (name) => reactionCategory(name),
+      ),
+    ).toEqual(Array(7).fill("useful"));
+    expect(["-1::skin-tone-6", "thumbsdown"].map((name) => reactionCategory(name))).toEqual(["not_useful", "not_useful"]);
+    expect(reactionCategory("face_with_monocle")).toBe("too_technical");
+    expect(reactionCategory("no_bell")).toBe("too_noisy");
+    expect(reactionCategory("thinking_face")).toBe("wrong");
+    expect(reactionCategory("sos")).toBe("escalate");
+    expect(reactionCategory("eyes")).toBe("ack");
+  });
+
+  it("files unknown emoji under other", () => {
+    for (const name of ["octopus", "thumbsup_all", "+1::skin-tone-9", "party_parrot"])
+      expect(reactionCategory(name)).toBe("other");
+  });
+
+  it("uses a bot's own map instead of the defaults", () => {
+    const categories = { useful: ["rocket"], escalate: ["fire"] };
+    expect(reactionCategory("rocket", categories)).toBe("useful");
+    expect(reactionCategory("+1", categories)).toBe("other");
+    expect(reactionCategory("fire::skin-tone-3", categories)).toBe("escalate");
+  });
+});
+
+describe("reactionCategoriesOf", () => {
+  it("normalises names and emoji and drops what cannot be used", () => {
+    expect(
+      reactionCategoriesOf({
+        " Too Noisy ": [":mute:", "zzz::skin-tone-2", "mute", 7],
+        other: ["octopus"],
+        empty: [],
+        broken: "fire",
+      }),
+    ).toEqual({ too_noisy: ["mute", "zzz"] });
+    expect(reactionCategoriesOf(null)).toEqual({});
+    expect(reactionCategoriesOf(["fire"])).toEqual({});
+  });
+});
+
+describe("reactionNote", () => {
+  const entry = (category: string, text: string | null = "Disk is 91% full\non db-1"): FeedbackEntry => ({
+    ts: "2026-11-23T10:00:00.000Z",
+    botId: "bot-1",
+    botName: "MoMi",
+    channel: "C9",
+    messageTs: "100.2",
+    threadTs: "100.1",
+    permalink: null,
+    threadId: "t-1",
+    reaction: "mute::skin-tone-2",
+    category,
+    userId: "U1",
+    change: "added",
+    text,
+  });
+
+  it("quotes the first 120 characters of the message with the category's instruction", () => {
+    expect(reactionNote(entry("too_noisy"), "Miro")).toBe(
+      '[Slack reaction · Miro reacted :mute: (too_noisy) to your message "Disk is 91% full on db-1"]\n' +
+        "Stop posting about this issue unless it becomes urgent; record the mute in ~/ops-notes/known-issues.md.",
+    );
+    expect(reactionNote(entry("wrong", "y".repeat(300)), "Miro")).toContain(`"${"y".repeat(120)}"]`);
+    expect(reactionNote(entry("escalate"), "Miro")).toMatch(/regardless of the daily cap\.$/);
+    expect(reactionNote(entry("ack", null), "Miro")).toMatch(/message ""\]\nA human is handling this; .* Reply NO_REPLY\.$/);
+  });
+
+  it("has nothing to say for logged-only categories", () => {
+    for (const category of ["useful", "not_useful", "too_technical", "other"]) expect(reactionNote(entry(category), "Miro")).toBeNull();
   });
 });
 
@@ -86,6 +160,7 @@ describe("recordFeedback", () => {
       permalink: "https://team.slack.com/archives/C9/p1002?thread_ts=100.1&cid=C9",
       threadId: "t-100.1",
       reaction: "+1",
+      category: "useful",
       userId: "U1",
       change: "added",
       text: "x".repeat(200),
@@ -103,10 +178,25 @@ describe("recordFeedback", () => {
       threadIdOf: () => null,
     });
 
-    expect((await lines(dir)).map((entry) => [entry.reaction, entry.change, entry.threadId])).toEqual([
-      ["-1::skin-tone-3", "added", null],
-      ["-1::skin-tone-3", "removed", null],
+    expect((await lines(dir)).map((entry) => [entry.reaction, entry.category, entry.change, entry.threadId])).toEqual([
+      ["-1::skin-tone-3", "not_useful", "added", null],
+      ["-1::skin-tone-3", "not_useful", "removed", null],
     ]);
+  });
+
+  it("categorises with the bot's own map and records unknown emoji as other", async () => {
+    const dir = await dataDir();
+    const custom = { ...bot, reactionCategories: { too_noisy: ["octopus"] } };
+    await recordFeedback({ dataDir: dir, bot: custom, reaction: reaction({ reaction: "octopus" }), threadIdOf: () => null });
+    await recordFeedback({ dataDir: dir, bot: custom, reaction: reaction({ reaction: "mute" }), threadIdOf: () => null });
+    await recordFeedback({ dataDir: dir, bot, reaction: reaction({ reaction: "mute" }), threadIdOf: () => null });
+
+    expect((await lines(dir)).map((entry) => [entry.reaction, entry.category])).toEqual([
+      ["octopus", "too_noisy"],
+      ["mute", "other"],
+      ["mute", "too_noisy"],
+    ]);
+    expect(DEFAULT_REACTION_CATEGORIES.too_noisy).toEqual(["mute", "zzz", "sleeping", "no_bell"]);
   });
 
   it("ignores people who are not allowed to use the bot without looking the message up", async () => {

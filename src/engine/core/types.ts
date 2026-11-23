@@ -172,6 +172,7 @@ export interface InboundReaction {
     readonly threadTs: string | null;
     readonly permalink: string | null;
     readonly text: string | null;
+    readonly userName?: string;
   }>;
 }
 
