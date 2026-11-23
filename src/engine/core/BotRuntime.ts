@@ -163,7 +163,13 @@ export interface ConversationSession {
   readonly key: string;
   readonly threadId: string | null;
   readonly conversation: ConversationRef;
-  readonly openThread: (title: string) => Promise<string>;
+  readonly openThread: (title: string, first: FirstMessage) => Promise<string>;
+}
+
+export interface FirstMessage {
+  readonly messageId: string;
+  readonly text: string;
+  readonly attachments: ReadonlyArray<ChatAttachment>;
 }
 
 interface ThreadModel {
@@ -266,11 +272,12 @@ export class BotRuntime {
     void this.startAdapter();
   }
 
-  private openThread(title: string): Promise<string> {
-    this.opening ??= this.options.session!.openThread(title).then(
+  private openThread(title: string, first: FirstMessage): Promise<string> {
+    const boundAt = new Date().toISOString();
+    this.opening ??= this.options.session!.openThread(title, first).then(
       (threadId) => {
         this.state.threadId = threadId;
-        this.state.boundAt = new Date().toISOString();
+        this.state.boundAt = boundAt;
         this.state.lastSequence = null;
         this.scheduleSave();
         this.subscribeMain(ThreadId.make(threadId));
@@ -970,7 +977,7 @@ export class BotRuntime {
         ...message,
         files: [...earlier.files, ...message.files],
       });
-      threadId ??= await this.openThread(requestTitle(earlier.opening ?? text));
+      const opening = threadId === null ? this.opening : null;
       const messageId = MessageId.make(Crypto.randomUUID());
       this.state.sentMessages[messageId] = {
         ref: message.ref,
@@ -995,17 +1002,23 @@ export class BotRuntime {
       this.recordActivity(
         newActivity({ id: messageId, user: message.userName, text, files: message.files.length }),
       );
-      await this.options.t3.dispatch({
-        type: "message.dispatch",
-        commandId: CommandId.make(Crypto.randomUUID()),
-        createdBy: "user",
-        creationSource: "mobile",
-        threadId: ThreadId.make(threadId),
-        messageId,
-        text: `${prefix}${earlier.text}${text.length > 0 ? text : "(see attachments)"}`,
-        attachments,
-        dispatchMode: { type: "queue_after_active" },
-      });
+      const body = `${prefix}${earlier.text}${text.length > 0 ? text : "(see attachments)"}`;
+      if (threadId === null && opening === null) {
+        await this.openThread(requestTitle(earlier.opening ?? text), { messageId, text: body, attachments });
+      } else {
+        threadId ??= await opening!;
+        await this.options.t3.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(Crypto.randomUUID()),
+          createdBy: "user",
+          creationSource: "mobile",
+          threadId: ThreadId.make(threadId),
+          messageId,
+          text: body,
+          attachments,
+          dispatchMode: { type: "queue_after_active" },
+        });
+      }
       await adapter
         .setRunStatus(message.ref, "running", null, conversation.threadTs)
         .catch(() => {});

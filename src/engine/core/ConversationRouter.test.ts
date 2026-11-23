@@ -22,6 +22,7 @@ interface Command {
   readonly threadId?: string;
   readonly messageId?: string;
   readonly text?: string;
+  readonly launched?: boolean;
 }
 
 function world() {
@@ -102,11 +103,19 @@ async function setup(
     isBridgeMessage: () => false,
     threaded: false,
     memoryDir: async () => Path.join(dataDir, "memory"),
-    openThread: async (title) => {
+    openThread: async (title, first) => {
       opened.push(title);
       next += 1;
       const threadId = `t-${next}`;
       if (next === 1 && options.gate !== undefined) await options.gate;
+      if (first !== undefined)
+        shared.commands.push({
+          type: "message.dispatch",
+          threadId,
+          messageId: first.messageId,
+          text: first.text,
+          launched: true,
+        });
       return { threadId, title };
     },
     settleThread: async (threadId) => {
@@ -167,6 +176,24 @@ describe("ConversationRouter", () => {
       title: "Fix the login bug",
       conversation: { id: "D1", threadTs: "100.1" },
     });
+    await router.stop();
+  });
+
+  it("puts the first message in the new thread's only turn and relays just its reply", async () => {
+    const { router, commands, sent, upserts, feed } = await setup();
+    await router.handleMessage(dm("Fix the login bug", "100.1"));
+
+    expect(commands).toEqual([
+      expect.objectContaining({ threadId: "t-1", launched: true, text: expect.stringMatching(/Fix the login bug$/) }),
+    ]);
+    await feed("t-1", { kind: "snapshot", snapshotSequence: 1, projection: { nodes: [], runtimeRequests: [], messages: [], runs: [], subagents: [], turnItems: [] } });
+    await feed("t-1", run("run-1", sent("t-1")[0]!.messageId!, "completed"));
+    await feed("t-1", reply("a-1", "run-1", "On it: the login fix"));
+    await settle();
+
+    expect(
+      upserts.filter(({ post }) => post.kind === "assistant").map(({ post }) => (post as { markdown: string }).markdown),
+    ).toEqual(["On it: the login fix"]);
     await router.stop();
   });
 

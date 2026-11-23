@@ -15,7 +15,7 @@ import { DiscordAdapter, discordInviteUrl, testDiscordToken } from "./adapters/d
 import { SlackAdapter, testSlackTokens } from "./adapters/slack/SlackAdapter.ts";
 import { TelegramAdapter, testTelegramToken } from "./adapters/telegram/TelegramAdapter.ts";
 import { isWorking, type ActivityEntry } from "./core/activity.ts";
-import { BotRuntime } from "./core/BotRuntime.ts";
+import { BotRuntime, type FirstMessage } from "./core/BotRuntime.ts";
 import { ButtonStore } from "./core/ButtonStore.ts";
 import { ConversationRouter } from "./core/ConversationRouter.ts";
 import {
@@ -224,6 +224,7 @@ export class Engine {
     readonly instructions?: string;
     readonly modelSelection?: ModelSelection;
     readonly pin?: boolean;
+    readonly firstMessage?: FirstMessage;
   }): Promise<{ threadId: string }> {
     const shell = await this.t3.getShell();
     const project = shell.projects.find((candidate) => candidate.id === input.projectId);
@@ -235,8 +236,13 @@ export class Engine {
       shell.threads[0]?.modelSelection;
     if (modelSelection === undefined)
       throw new Error("Pick a model: this project has no default model yet.");
-    const messageId = MessageId.make(Crypto.randomUUID());
-    await this.rememberBridgeMessage(messageId);
+    const instructions = withMemory(
+      input.instructions?.trim() || DEFAULT_INSTRUCTIONS,
+      memoryDir(project.workspaceRoot),
+    );
+    const first = input.firstMessage;
+    const messageId = MessageId.make(first?.messageId ?? Crypto.randomUUID());
+    if (first === undefined) await this.rememberBridgeMessage(messageId);
     const launched = await this.t3.launchThread({
       commandId: CommandId.make(Crypto.randomUUID()),
       creationSource: "mobile",
@@ -248,11 +254,8 @@ export class Engine {
       workspaceStrategy: { type: "root" },
       initialMessage: {
         messageId,
-        text: withMemory(
-          input.instructions?.trim() || DEFAULT_INSTRUCTIONS,
-          memoryDir(project.workspaceRoot),
-        ),
-        attachments: [],
+        text: first === undefined ? instructions : `${instructions}\n\n---\n\n${first.text}`,
+        attachments: first?.attachments ?? [],
       },
     });
     if (input.pin !== false)
@@ -387,14 +390,15 @@ export class Engine {
     return this.createLikeBotThread(botId, `${bot?.name ?? "Bot"} orchestrator · ${day}`, true);
   }
 
-  async createConversationThread(botId: string, title: string) {
-    return this.createLikeBotThread(botId, title, false);
+  async createConversationThread(botId: string, title: string, first?: FirstMessage) {
+    return this.createLikeBotThread(botId, title, false, first);
   }
 
   private async createLikeBotThread(
     botId: string,
     title: string,
     pin: boolean,
+    first?: FirstMessage,
   ): Promise<{ threadId: string; title: string }> {
     const bot = this.config.get().bots.find((candidate) => candidate.id === botId);
     if (bot === undefined) throw new NotFoundError("No such bot");
@@ -408,6 +412,7 @@ export class Engine {
       instructions: bot.instructions,
       modelSelection: current.modelSelection,
       pin,
+      ...(first === undefined ? {} : { firstMessage: first }),
     });
     return { threadId, title };
   }
@@ -544,7 +549,7 @@ export class Engine {
       bot.conversationMode === "per-thread"
         ? new ConversationRouter({
             ...shared,
-            openThread: (title) => this.createConversationThread(bot.id, title),
+            openThread: (title, first) => this.createConversationThread(bot.id, title, first),
             settleThread: (threadId) => this.settleThread(threadId),
             settleAfterMs: settleAfterDays > 0 ? settleAfterDays * 24 * 60 * 60_000 : null,
           })

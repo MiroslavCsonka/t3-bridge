@@ -2,7 +2,13 @@ import * as Path from "node:path";
 
 import { readJson, writeJsonAtomic } from "../store.ts";
 import { MAX_ACTIVITY, type ActivityEntry } from "./activity.ts";
-import { BotRuntime, errorText, STOP_COMMAND, type BotRuntimeOptions } from "./BotRuntime.ts";
+import {
+  BotRuntime,
+  errorText,
+  STOP_COMMAND,
+  type BotRuntimeOptions,
+  type FirstMessage,
+} from "./BotRuntime.ts";
 import type {
   AdapterStatus,
   ChatAdapter,
@@ -30,7 +36,10 @@ export type ConversationRouterOptions = Omit<
   BotRuntimeOptions,
   "createFreshThread" | "switchThread" | "session"
 > & {
-  readonly openThread: (title: string) => Promise<{ threadId: string; title: string }>;
+  readonly openThread: (
+    title: string,
+    first?: FirstMessage,
+  ) => Promise<{ threadId: string; title: string }>;
   readonly settleThread: (threadId: string) => Promise<void>;
   readonly settleAfterMs: number | null;
 };
@@ -231,7 +240,7 @@ export class ConversationRouter {
         key,
         threadId: this.state.conversations[key]?.threadId ?? null,
         conversation,
-        openThread: (title) => this.openThread(key, conversation, title),
+        openThread: (title, first) => this.openThread(key, conversation, title, first),
       },
     });
     const session = { runtime, ready: runtime.start() };
@@ -239,8 +248,13 @@ export class ConversationRouter {
     return session;
   }
 
-  private async openThread(key: string, conversation: ConversationRef, title: string) {
-    const { threadId } = await this.options.openThread(title);
+  private async openThread(
+    key: string,
+    conversation: ConversationRef,
+    title: string,
+    first: FirstMessage,
+  ) {
+    const { threadId } = await this.options.openThread(title, first);
     const now = new Date().toISOString();
     this.state.conversations[key] = { threadId, conversation, title, createdAt: now, activeAt: now };
     await this.saveNow();
