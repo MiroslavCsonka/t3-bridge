@@ -173,10 +173,21 @@ describe("ConversationRouter", () => {
   it("does not open a thread for commands or strangers' channel chatter", async () => {
     const { router, opened, commands } = await setup();
     await router.handleMessage(dm("!stop", "100.1"));
+    await router.handleMessage(dm("!remember Deploys go through CI", "100.2"));
     await router.handleMessage({ ...dm("lunch?", "300.1"), conversation: { id: "C1", label: "#general" }, isDirect: false });
     expect(opened).toEqual([]);
     expect(commands).toEqual([]);
     expect(router.conversationCount).toBe(0);
+    await router.stop();
+  });
+
+  it("stops every conversation on a stop outside any of them", async () => {
+    const { router, stops, replies } = await setup();
+    await router.handleMessage(dm("Fix the login bug", "100.1"));
+    await router.handleMessage(dm("Write the release notes", "200.1"));
+    await router.handleMessage(dm("/stop", "300.1"));
+    expect(stops().sort()).toEqual(["t-1", "t-2"]);
+    expect(replies.at(-1)).toBe("⏹ Stopping every conversation.");
     await router.stop();
   });
 

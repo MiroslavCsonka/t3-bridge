@@ -2,7 +2,7 @@ import * as Path from "node:path";
 
 import { readJson, writeJsonAtomic } from "../store.ts";
 import { MAX_ACTIVITY, type ActivityEntry } from "./activity.ts";
-import { BotRuntime, errorText, type BotRuntimeOptions } from "./BotRuntime.ts";
+import { BotRuntime, errorText, STOP_COMMAND, type BotRuntimeOptions } from "./BotRuntime.ts";
 import type {
   AdapterStatus,
   ChatAdapter,
@@ -148,6 +148,15 @@ export class ConversationRouter {
       !message.mentionsBot
     )
       return;
+    if (
+      record === undefined &&
+      STOP_COMMAND.test(message.text.trim()) &&
+      this.bot.allowedUserIds.includes(message.userId)
+    ) {
+      await this.stopThread();
+      await this.options.adapter.reply(message, "⏹ Stopping every conversation.");
+      return;
+    }
     if (record?.settledAt !== undefined) {
       const { settledAt: _, ...active } = record;
       this.state.conversations[key] = active;

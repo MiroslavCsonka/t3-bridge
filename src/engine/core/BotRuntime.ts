@@ -132,6 +132,7 @@ const MAX_FILE_BYTES = 50 * 1024 * 1024;
 /** Earlier messages are quoted up to about this many characters, newest kept. */
 const MAX_CONTEXT_CHARS = 6000;
 const MAX_CONTEXT_FILES = 6;
+export const STOP_COMMAND = /^(!stop|stop!|\/stop)$/i;
 
 export interface BotRuntimeOptions {
   readonly bot: BotConfig;
@@ -944,7 +945,7 @@ export class BotRuntime {
     if (this.options.threaded) this.state.lastThread = conversation;
 
     const text = message.text.trim();
-    if (/^(!stop|stop!|\/stop)$/i.test(text)) {
+    if (STOP_COMMAND.test(text)) {
       await this.stopThread();
       await adapter.reply(message, "⏹ Stopping the agent.");
       return;
