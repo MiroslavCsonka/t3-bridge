@@ -15,7 +15,7 @@ afterEach(async () => {
   for (const dir of dirs.splice(0)) await FS.rm(dir, { recursive: true, force: true });
 });
 
-async function setup() {
+async function setup(options: { readonly dispatchError?: Error } = {}) {
   const dataDir = await FS.mkdtemp(Path.join(OS.tmpdir(), "t3-bridge-runtime-"));
   dirs.push(dataDir);
   const memoryDir = Path.join(dataDir, "memory");
@@ -26,6 +26,7 @@ async function setup() {
   const upserts: Array<{ post: OutboundPost; edit: boolean; threadTs: string | undefined }> = [];
   let postCount = 0;
   let feed: ((item: unknown) => Promise<void>) | null = null;
+  const lines: string[] = [];
   const t3 = {
     subscribeThread: (input: { onItem: (item: unknown) => Promise<void> }) => {
       feed = input.onItem;
@@ -37,6 +38,7 @@ async function setup() {
       text?: string;
       attachments?: unknown[];
     }) => {
+      if (options.dispatchError !== undefined) throw options.dispatchError;
       if (command.type === "message.dispatch")
         dispatched.push({
           messageId: command.messageId ?? "",
@@ -81,7 +83,7 @@ async function setup() {
     adapter,
     t3,
     dataDir,
-    log: makeLogger(() => {}),
+    log: makeLogger((line) => lines.push(line)),
     platformLabel: "Slack",
     claimOwner: async () => {},
     isBridgeMessage: () => false,
@@ -91,7 +93,7 @@ async function setup() {
     memoryDir: async () => memoryDir,
   });
   await runtime.start();
-  return { runtime, dispatched, uploaded, replies, posts, upserts, memoryDir, feed: (item: unknown) => feed!(item) };
+  return { runtime, dispatched, uploaded, replies, posts, upserts, memoryDir, lines, feed: (item: unknown) => feed!(item) };
 }
 
 const alert: EarlierMessage = {
@@ -163,6 +165,19 @@ describe("BotRuntime brought into a conversation", () => {
       }),
     );
     expect(dispatched[0]!.text).toMatch(/\]\nLook at this$/);
+    await runtime.stop();
+  });
+
+  it("logs a greppable error and gives a plain reply when T3 cannot take the message", async () => {
+    const { runtime, replies, lines } = await setup({
+      dispatchError: new Error("The bot's current thread is gone\nsomewhere"),
+    });
+    await runtime.handleMessage(mention("Look at this", "101.000", async () => []));
+    expect(lines.filter((line) => line.includes("T3_UNREACHABLE"))).toEqual([
+      expect.stringMatching(/ ERROR T3_UNREACHABLE bot=bot-1 reason=The bot's current thread is gone somewhere$/),
+    ]);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).not.toMatch(/T3|thread|pick one/i);
     await runtime.stop();
   });
 });

@@ -1044,7 +1044,7 @@ export class BotRuntime {
         conversation,
       };
     } catch (error) {
-      log.error(`[${this.bot.name}] sending a message to T3 failed`, error);
+      this.logUnreachable(error);
       const failed = newActivity({
         id: recorded ?? Crypto.randomUUID(),
         user: message.userName,
@@ -1054,8 +1054,13 @@ export class BotRuntime {
       });
       if (recorded === null) this.recordActivity(failed);
       else this.state.activity = this.activity.map((entry) => (entry.id === recorded ? failed : entry));
-      await adapter.reply(message, `⚠️ Could not reach T3: ${errorText(error)}`);
+      await adapter.reply(message, UNREACHABLE_REPLY);
     }
+  }
+
+  private logUnreachable(error: unknown) {
+    const reason = errorText(error).replace(/\s+/g, " ");
+    this.options.log.error(`T3_UNREACHABLE bot=${this.bot.id} reason=${reason}`);
   }
 
   /**
@@ -1177,7 +1182,11 @@ export class BotRuntime {
       );
       void this.options.switchThread(fresh.threadId);
     } catch (error) {
-      await adapter.reply(message, `⚠️ Could not start a new thread: ${errorText(error)}`);
+      this.logUnreachable(error);
+      await adapter.reply(
+        message,
+        "⚠️ Sorry, I couldn't start a new thread just now. Please try again in a few minutes.",
+      );
     }
   }
 
@@ -1502,6 +1511,9 @@ function safeFileName(title: string) {
       .slice(0, 60) || "render"
   );
 }
+
+const UNREACHABLE_REPLY =
+  "⚠️ Sorry, I couldn't pass that on just now. It has been logged; please try again in a few minutes.";
 
 export function errorText(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).slice(0, 300);

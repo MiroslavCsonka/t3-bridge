@@ -2,6 +2,8 @@ import * as Crypto from "node:crypto";
 import * as FS from "node:fs/promises";
 import * as Path from "node:path";
 
+import type { ModelSelection } from "@t3tools/contracts";
+
 import type { LocalEnvironmentOptions } from "./t3/localEnvironment.ts";
 
 export type Platform = "slack" | "discord" | "telegram";
@@ -15,6 +17,8 @@ export interface BotConfig {
   readonly enabled: boolean;
   /** The T3 thread this bot talks to: the orchestrator. */
   readonly threadId: string | null;
+  readonly projectId?: string;
+  readonly modelSelection?: ModelSelection;
   /** Platform user ids allowed to drive the agent. Empty means the first person to DM the bot claims it. */
   readonly allowedUserIds: ReadonlyArray<string>;
   readonly instructions: string;

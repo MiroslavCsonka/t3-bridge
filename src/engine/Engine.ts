@@ -399,9 +399,7 @@ export class Engine {
 
   /** A new orchestrator thread in the same project, with the same model and instructions. */
   async createFreshThread(botId: string): Promise<{ threadId: string; title: string }> {
-    const bot = this.config.get().bots.find((candidate) => candidate.id === botId);
-    const day = new Date().toLocaleDateString("en-GB", { day: "numeric", month: "short" });
-    return this.createLikeBotThread(botId, `${bot?.name ?? "Bot"} orchestrator · ${day}`, true);
+    return this.createLikeBotThread(botId, orchestratorTitle(this.botConfig(botId)), true);
   }
 
   async createConversationThread(botId: string, title: string, first?: FirstMessage) {
@@ -414,21 +412,147 @@ export class Engine {
     pin: boolean,
     first?: FirstMessage,
   ): Promise<{ threadId: string; title: string }> {
-    const bot = this.config.get().bots.find((candidate) => candidate.id === botId);
-    if (bot === undefined) throw new NotFoundError("No such bot");
-    const shell = await this.t3.getShell();
-    const current = shell.threads.find((thread) => thread.id === bot.threadId);
-    if (current === undefined)
-      throw new Error("The bot's current thread is gone; pick one in T3 Bridge.");
+    const bot = this.botConfig(botId);
+    const { template, lost } = await this.resolveBotThread(bot);
+    if (template === null) {
+      this.log.error(
+        `T3_BOT_THREAD_LOST bot=${bot.id} thread=${bot.threadId} reason=no project on record to replace it`,
+      );
+      throw new Error("The bot's orchestrator thread is gone and no project is on record to replace it.");
+    }
+    if (lost && !pin) await this.replaceBotThread(bot, template);
     const { threadId } = await this.createOrchestratorThread({
-      projectId: current.projectId,
+      projectId: template.projectId,
       title,
       instructions: bot.instructions,
-      modelSelection: current.modelSelection,
+      ...(template.modelSelection === undefined ? {} : { modelSelection: template.modelSelection }),
       pin,
       ...(first === undefined ? {} : { firstMessage: first }),
     });
     return { threadId, title };
+  }
+
+  private botConfig(botId: string): BotConfig {
+    const bot = this.config.get().bots.find((candidate) => candidate.id === botId);
+    if (bot === undefined) throw new NotFoundError("No such bot");
+    return bot;
+  }
+
+  private async resolveBotThread(
+    bot: BotConfig,
+  ): Promise<{ readonly template: BotThreadTemplate | null; readonly lost: boolean }> {
+    const shell = await this.t3.getShell();
+    const live = shell.threads.find(
+      (thread) => thread.id === bot.threadId && thread.archivedAt === null && thread.deletedAt === null,
+    );
+    if (live !== undefined)
+      return { template: await this.rememberBotThread(bot.id, live.id, live), lost: false };
+    const archived = bot.threadId === null ? undefined : await this.archivedThread(bot.threadId);
+    if (archived !== undefined) {
+      await this.restoreBotThread(bot, archived.id);
+      return { template: await this.rememberBotThread(bot.id, archived.id, archived), lost: false };
+    }
+    return { template: await this.replacementTemplate(bot, shell), lost: true };
+  }
+
+  private async archivedThread(threadId: string) {
+    const archived = await this.t3.getArchivedShell().catch((error: unknown) => {
+      this.log.warn(`Looking up archived thread ${threadId} failed`, error);
+      return null;
+    });
+    return archived?.threads.find((thread) => thread.id === threadId && thread.deletedAt === null);
+  }
+
+  private async restoreBotThread(bot: BotConfig, threadId: string) {
+    const command = (type: "thread.unarchive" | "thread.pin") =>
+      this.t3.dispatch({
+        type,
+        commandId: CommandId.make(Crypto.randomUUID()),
+        threadId: ThreadId.make(threadId),
+      });
+    try {
+      await command("thread.unarchive");
+      await command("thread.pin").catch((error: unknown) =>
+        this.log.warn(`[${bot.name}] Re-pinning ${threadId} failed`, error),
+      );
+      this.log.warn(`T3_BOT_THREAD_RECOVERED bot=${bot.id} action=unarchived thread=${threadId}`);
+    } catch (error) {
+      this.log.error(`[${bot.name}] Unarchiving its orchestrator thread ${threadId} failed`, error);
+    }
+  }
+
+  private async replacementTemplate(
+    bot: BotConfig,
+    shell: OrchestrationV2ShellSnapshot,
+  ): Promise<BotThreadTemplate | null> {
+    const known = (projectId: string | undefined) =>
+      shell.projects.some((project) => project.id === projectId);
+    if (known(bot.projectId))
+      return {
+        projectId: bot.projectId!,
+        ...(bot.modelSelection === undefined ? {} : { modelSelection: bot.modelSelection }),
+      };
+    const remembered =
+      bot.threadId === null
+        ? null
+        : await this.t3
+            .getThreadProjection(ThreadId.make(bot.threadId))
+            .then((projection) => projection.thread)
+            .catch(() => null);
+    if (remembered !== null && known(remembered.projectId))
+      return { projectId: remembered.projectId, modelSelection: remembered.modelSelection };
+    const only = shell.projects.length === 1 ? shell.projects[0]! : null;
+    if (only !== null)
+      return {
+        projectId: only.id,
+        ...(only.defaultModelSelection === null ? {} : { modelSelection: only.defaultModelSelection }),
+      };
+    return null;
+  }
+
+  private async replaceBotThread(bot: BotConfig, template: BotThreadTemplate) {
+    const { threadId } = await this.createOrchestratorThread({
+      projectId: template.projectId,
+      title: orchestratorTitle(bot),
+      instructions: bot.instructions,
+      ...(template.modelSelection === undefined ? {} : { modelSelection: template.modelSelection }),
+      pin: true,
+    });
+    await this.rememberBotThread(bot.id, threadId, template);
+    this.log.warn(
+      `T3_BOT_THREAD_RECOVERED bot=${bot.id} action=replaced old=${bot.threadId} thread=${threadId}`,
+    );
+  }
+
+  private async rememberBotThread(
+    botId: string,
+    threadId: string,
+    template: BotThreadTemplate,
+  ): Promise<BotThreadTemplate> {
+    const current = this.config.get().bots.find((bot) => bot.id === botId);
+    const sameModel =
+      template.modelSelection === undefined ||
+      (current?.modelSelection !== undefined &&
+        modelKey(current.modelSelection) === modelKey(template.modelSelection));
+    const unchanged =
+      current?.threadId === threadId && current.projectId === template.projectId && sameModel;
+    if (current !== undefined && !unchanged)
+      await this.config.update((config) => ({
+        ...config,
+        bots: config.bots.map((bot) =>
+          bot.id === botId
+            ? {
+                ...bot,
+                threadId,
+                projectId: template.projectId,
+                ...(template.modelSelection === undefined
+                  ? {}
+                  : { modelSelection: template.modelSelection }),
+              }
+            : bot,
+        ),
+      }));
+    return template;
   }
 
   private async settleThread(threadId: string) {
@@ -587,7 +711,10 @@ export class Engine {
       },
       isBridgeMessage: (messageId: string) => this.bridgeMessages.has(messageId),
       threaded: isAgentLayout(bot),
-      memoryDir: () => this.memoryDirForThread(bot.threadId),
+      memoryDir: () =>
+        this.memoryDirForThread(
+          this.config.get().bots.find((candidate) => candidate.id === bot.id)?.threadId ?? null,
+        ),
     };
     const settleAfterDays = bot.settleAfterDays ?? DEFAULT_SETTLE_AFTER_DAYS;
     const runtime: BotRuntime | ConversationRouter =
@@ -610,6 +737,10 @@ export class Engine {
       this.log.error(`[${bot.name}] could not start`, error);
       runtime.lastError = error instanceof Error ? error.message : String(error);
     }
+    if (bot.threadId !== null)
+      void this.resolveBotThread(bot).catch((error: unknown) =>
+        this.log.warn(`[${bot.name}] Checking its orchestrator thread failed`, error),
+      );
   }
 
   private async makeAdapter(bot: BotConfig): Promise<ChatAdapter | null> {
@@ -637,6 +768,16 @@ export class Engine {
 }
 
 export class NotFoundError extends Error {}
+
+interface BotThreadTemplate {
+  readonly projectId: string;
+  readonly modelSelection?: ModelSelection;
+}
+
+function orchestratorTitle(bot: BotConfig) {
+  const day = new Date().toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+  return `${bot.name} orchestrator · ${day}`;
+}
 
 /** What the bot list shows: the request in progress, and how today went. */
 function summarize(activity: ReadonlyArray<ActivityEntry>) {

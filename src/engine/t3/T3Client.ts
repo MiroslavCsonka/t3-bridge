@@ -188,6 +188,12 @@ export class T3Client {
     return this.request((client) => client[ORCHESTRATION_V2_WS_METHODS.launchThread](input));
   }
 
+  async getArchivedShell() {
+    return this.request((client) =>
+      client[ORCHESTRATION_V2_WS_METHODS.getArchivedShellSnapshot]({}),
+    );
+  }
+
   async getThreadProjection(threadId: ThreadId) {
     return this.request((client) =>
       client[ORCHESTRATION_V2_WS_METHODS.getThreadProjection]({ threadId }),
